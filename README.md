@@ -94,6 +94,15 @@ make CXX=x86_64-w64-mingw32-g++ WINDRES=x86_64-w64-mingw32-windres
 Output: `build/NaturalCalculator.exe`, no installer, no runtime deps —
 copy it anywhere and run it.
 
+## Keyboard shortcuts
+
+- Type `x+y=5`, press Enter, then type `x-y=6` and press Enter to solve the
+  two-variable system. The second line displays both values.
+- Press Up to recall the previous submitted expression, like a shell history.
+- Press Delete twice quickly to clear the current expression, calculation
+  history, and all saved variable values.
+- Type `x` or `y` directly, or use the matching buttons in the top bar.
+
 **With MSVC** (not wired into the Makefile, but the source has no
 MinGW-specific dependencies): create a new empty C++ Windows app project,
 add all files in `src/`, set the subsystem to Windows, build.

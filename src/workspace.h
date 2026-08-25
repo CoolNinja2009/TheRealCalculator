@@ -7,6 +7,7 @@
 
 #pragma once
 #include "expr_tree.h"
+#include "evaluator.h"
 #include <vector>
 #include <memory>
 #include <string>
@@ -27,14 +28,19 @@ public:
     // Evaluate the current expression, push it (with its result) onto the
     // history list, and start a fresh empty expression. Returns false (and
     // does nothing) if the current expression is entirely empty.
-    bool commitCurrent();
+    bool commitCurrent(const EvaluationContext& context = EvaluationContext{});
+
+    // Recall the previous committed expression into the editable line.
+    bool recallPrevious();
 
     void clearAll() {
         history_.clear();
         current_ = std::make_unique<Expression>();
+        recallIndex_ = 0;
     }
 
 private:
     std::vector<std::unique_ptr<HistoryEntry>> history_;
     std::unique_ptr<Expression> current_;
+    size_t recallIndex_ = 0;
 };

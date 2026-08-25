@@ -6,6 +6,14 @@
 
 bool rowIsEmpty(const Row* r) { return r == nullptr || r->items.empty(); }
 
+bool hasEquals(const Row* r) {
+    if (!r) return false;
+    for (const auto& item : r->items) {
+        if (item->type == ItemType::Equals) return true;
+    }
+    return false;
+}
+
 static void attachRow(std::unique_ptr<Row>& slot, Item* owner, Row* ownerParentRow) {
     if (!slot) slot = std::make_unique<Row>();
     slot->owner = owner;
@@ -49,10 +57,16 @@ static void serializeItem(const Item* it, std::string& out) {
         case ItemType::Number:
             out += it->numText;
             break;
+        case ItemType::Variable:
+            out += it->variableName;
+            break;
         case ItemType::Operator:
             out += ' ';
             out += it->opChar;
             out += ' ';
+            break;
+        case ItemType::Equals:
+            out += " = ";
             break;
         case ItemType::Fraction:
             out += '(';
@@ -92,6 +106,32 @@ std::string Expression::toPlainString() const {
     return out;
 }
 
+static std::unique_ptr<Row> cloneRow(const Row* source, Item* owner, Row* parent) {
+    auto copy = std::make_unique<Row>();
+    copy->owner = owner;
+    copy->ownerParentRow = parent;
+    if (!source) return copy;
+    for (const auto& sourceItem : source->items) {
+        auto item = std::make_unique<Item>(sourceItem->type);
+        item->numText = sourceItem->numText;
+        item->opChar = sourceItem->opChar;
+        item->variableName = sourceItem->variableName;
+        Item* itemPtr = item.get();
+        if (sourceItem->a) item->a = cloneRow(sourceItem->a.get(), itemPtr, copy.get());
+        if (sourceItem->b) item->b = cloneRow(sourceItem->b.get(), itemPtr, copy.get());
+        copy->items.push_back(std::move(item));
+    }
+    return copy;
+}
+
+std::unique_ptr<Expression> cloneExpression(const Expression& source) {
+    auto copy = std::make_unique<Expression>();
+    copy->root = cloneRow(source.root.get(), nullptr, nullptr);
+    copy->cursor.row = copy->root.get();
+    copy->cursor.index = (int)copy->root->items.size();
+    return copy;
+}
+
 // ---------------------------------------------------------------- insert
 
 void insertDigit(Expression& expr, char digit) {
@@ -112,11 +152,29 @@ void insertDigit(Expression& expr, char digit) {
     expr.cursor.index = idx + 1;
 }
 
+void insertVariable(Expression& expr, char name) {
+    if (name != 'x' && name != 'y') return;
+    Row* row = expr.cursor.row;
+    int idx = expr.cursor.index;
+    auto item = std::make_unique<Item>(ItemType::Variable);
+    item->variableName = name;
+    row->items.insert(row->items.begin() + idx, std::move(item));
+    expr.cursor.index = idx + 1;
+}
+
 void insertOperator(Expression& expr, char op) {
     Row* row = expr.cursor.row;
     int idx = expr.cursor.index;
     auto item = std::make_unique<Item>(ItemType::Operator);
     item->opChar = op;
+    row->items.insert(row->items.begin() + idx, std::move(item));
+    expr.cursor.index = idx + 1;
+}
+
+void insertEquals(Expression& expr) {
+    Row* row = expr.cursor.row;
+    int idx = expr.cursor.index;
+    auto item = std::make_unique<Item>(ItemType::Equals);
     row->items.insert(row->items.begin() + idx, std::move(item));
     expr.cursor.index = idx + 1;
 }
@@ -231,6 +289,8 @@ void moveLeft(Expression& expr) {
         Item* prev = row->items[idx - 1].get();
         switch (prev->type) {
             case ItemType::Number:
+            case ItemType::Variable:
+            case ItemType::Equals:
             case ItemType::Operator:
                 expr.cursor.index = idx - 1;
                 return;
@@ -265,6 +325,8 @@ void moveRight(Expression& expr) {
         Item* next = row->items[idx].get();
         switch (next->type) {
             case ItemType::Number:
+            case ItemType::Variable:
+            case ItemType::Equals:
             case ItemType::Operator:
                 expr.cursor.index = idx + 1;
                 return;
@@ -360,6 +422,11 @@ void backspace(Expression& expr) {
         }
         return;
     }
+    if (target->type == ItemType::Variable) {
+        row->items.erase(row->items.begin() + (idx - 1));
+        expr.cursor.index = idx - 1;
+        return;
+    }
     if (target->type == ItemType::Operator) {
         row->items.erase(row->items.begin() + (idx - 1));
         expr.cursor.index = idx - 1;
@@ -420,6 +487,10 @@ void doDelete(Expression& expr) {
         } else {
             row->items.erase(row->items.begin() + idx);
         }
+        return;
+    }
+    if (target->type == ItemType::Variable) {
+        row->items.erase(row->items.begin() + idx);
         return;
     }
     if (target->type == ItemType::Operator) {

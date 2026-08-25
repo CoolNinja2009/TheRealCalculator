@@ -24,7 +24,9 @@
 
 enum class ItemType {
     Number,     // a run of digits and at most one '.'
+    Variable,   // a named numeric variable (currently x or y)
     Operator,   // + - * (leaf glyph; division never appears here, see Fraction)
+    Equals,     // equation separator
     Fraction,   // a/b  -> child rows: numerator (a), denominator (b)
     Paren,      // (a)  -> child row: inner (a).  b unused.
     Power,      // a^b  -> child rows: base (a), exponent (b)
@@ -38,6 +40,9 @@ struct Item {
 
     // Number
     std::string numText;   // e.g. "12.5"
+
+    // Variable
+    char variableName = 0; // 'x' or 'y'
 
     // Operator
     char opChar = 0;       // '+', '-', '*'
@@ -83,14 +88,23 @@ struct Expression {
     std::string toPlainString() const;
 };
 
+// Copy an expression tree for history recall without sharing editable state.
+std::unique_ptr<Expression> cloneExpression(const Expression& source);
+
 // ---- Editing operations -------------------------------------------------
 // All operations act on `expr.cursor` and mutate the tree in place.
 
 // Insert a digit or '.' at the cursor, extending/starting a Number item.
 void insertDigit(Expression& expr, char digit);
 
+// Insert a named variable at the cursor.
+void insertVariable(Expression& expr, char name);
+
 // Insert a flat operator (+, -, *) as its own Item at the cursor.
 void insertOperator(Expression& expr, char op);
+
+// Insert an equation separator. Enter still submits the current line.
+void insertEquals(Expression& expr);
 
 // '/' key: wrap the atom immediately to the left of the cursor (or start
 // an empty one) into a Fraction, cursor moves into the denominator.
@@ -135,3 +149,4 @@ void doDelete(Expression& expr);
 // True if the row is completely empty (used for placeholder box rendering
 // and for structural collapse logic).
 bool rowIsEmpty(const Row* r);
+bool hasEquals(const Row* r);

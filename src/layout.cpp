@@ -125,6 +125,12 @@ Size measureNumber(HDC hdc, const Item* it, int depth) {
     return s;
 }
 
+Size measureVariable(HDC hdc, const Item* it, int depth) {
+    Item display(ItemType::Number);
+    display.numText = std::string(1, it->variableName);
+    return measureNumber(hdc, &display, depth);
+}
+
 const wchar_t* opGlyph(char c) {
     switch (c) {
         case '+': return L" + ";
@@ -149,6 +155,17 @@ Size measureOperator(HDC hdc, const Item* it, int depth) {
     return s;
 }
 
+Size measureEquals(HDC hdc, int depth) {
+    HFONT f = fontForDepth(depth);
+    HFONT old = (HFONT)SelectObject(hdc, f);
+    SIZE sz{};
+    const wchar_t* glyph = L" = ";
+    GetTextExtentPoint32W(hdc, glyph, 3, &sz);
+    SelectObject(hdc, old);
+    TEXTMETRICW tm = textMetricsForDepth(hdc, depth);
+    return { sz.cx, tm.tmAscent, tm.tmDescent };
+}
+
 Size measureRowImpl(HDC hdc, const Row* row, int depth) {
     if (rowIsEmpty(row)) return placeholderSize(depth);
     Size total;
@@ -164,6 +181,8 @@ Size measureRowImpl(HDC hdc, const Row* row, int depth) {
 Size measureItemImpl(HDC hdc, const Item* it, int depth) {
     switch (it->type) {
         case ItemType::Number:   return measureNumber(hdc, it, depth);
+        case ItemType::Variable: return measureVariable(hdc, it, depth);
+        case ItemType::Equals:   return measureEquals(hdc, depth);
         case ItemType::Operator: return measureOperator(hdc, it, depth);
         case ItemType::Fraction: {
             Size num = measureRowImpl(hdc, it->a.get(), depth + 1);
@@ -271,6 +290,14 @@ void drawItemImpl(HDC hdc, const Item* it, int depth, int x, int baselineY,
             drawText(hdc, depth, x, baselineY, w, theme.text);
             return;
         }
+        case ItemType::Variable: {
+            std::wstring w(1, (wchar_t)it->variableName);
+            drawText(hdc, depth, x, baselineY, w, theme.operatorColor);
+            return;
+        }
+        case ItemType::Equals:
+            drawText(hdc, depth, x, baselineY, L" = ", theme.operatorColor);
+            return;
         case ItemType::Operator: {
             drawText(hdc, depth, x, baselineY, opGlyph(it->opChar), theme.operatorColor);
             return;

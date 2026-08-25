@@ -23,10 +23,30 @@
 #include "expr_tree.h"
 #include <string>
 
+struct EvaluationContext {
+	double x = 0.0;
+	double y = 0.0;
+};
+
 // Evaluate the whole expression. Throws std::runtime_error on error.
 double evaluate(const Row* root);
+double evaluate(const Row* root, const EvaluationContext& context);
 
 // Convenience: evaluate and format to a display string (trims trailing
 // zeros, switches to scientific notation for very large/small magnitudes).
 // On error, returns the exception's message prefixed with an error glyph.
 std::string evaluateToString(const Row* root);
+std::string evaluateToString(const Row* root, const EvaluationContext& context);
+
+struct QuadraticResult {
+	bool valid = true;
+	int rootCount = 0;
+	double first = 0.0;
+	double second = 0.0;
+	std::string message;
+};
+
+QuadraticResult solveQuadratic(double a, double b, double c);
+
+bool solveTwoVariableSystem(const Row* first, const Row* second,
+							double& x, double& y, std::string& message);

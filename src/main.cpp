@@ -9,13 +9,20 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <dwmapi.h>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
+#include <cmath>
+#include <utility>
+#include <cstdlib>
 #include "expr_tree.h"
 #include "layout.h"
 #include "evaluator.h"
 #include "workspace.h"
+#include "resource.h"
 
 namespace {
 
@@ -34,7 +41,8 @@ enum Action {
     ActDigit5, ActDigit6, ActDigit7, ActDigit8, ActDigit9,
     ActDot, ActPlus, ActMinus, ActMul, ActFrac,
     ActOpenParen, ActCloseParen, ActPower, ActSqrt,
-    ActEquals, ActClear, ActClearAll, ActToggleTheme, ActBackspace
+    ActEquals, ActClear, ActClearAll, ActToggleTheme, ActBackspace,
+    ActVariableX, ActVariableY, ActQuadratic
 };
 
 struct App {
@@ -44,15 +52,20 @@ struct App {
     bool caretVisible = true;
     int scrollY = 0;
     bool scrollToBottomPending = false;
+    DWORD lastDeleteTick = 0;
+    EvaluationContext values;
     std::vector<ButtonDef> buttons;
     RECT topBarRect{}, historyRect{}, editorRect{}, buttonAreaRect{};
     HFONT uiFont = nullptr;
     HFONT uiFontSmall = nullptr;
+    HICON appIcon = nullptr;
 } g;
 
 constexpr UINT_PTR kCaretTimerId = 1;
 constexpr int kMinWidth = 340;
 constexpr int kMinHeight = 480;
+
+void setDarkTitleBar(HWND hwnd, bool dark);
 
 // ------------------------------------------------------------- layout
 
@@ -149,6 +162,8 @@ void doAction(int action) {
         case ActDigit8: insertDigit(cur, '8'); break;
         case ActDigit9: insertDigit(cur, '9'); break;
         case ActDot: insertDigit(cur, '.'); break;
+        case ActVariableX: insertVariable(cur, 'x'); break;
+        case ActVariableY: insertVariable(cur, 'y'); break;
         case ActPlus: insertOperator(cur, '+'); break;
         case ActMinus: insertOperator(cur, '-'); break;
         case ActMul: insertOperator(cur, '*'); break;
@@ -159,7 +174,7 @@ void doAction(int action) {
         case ActSqrt: insertSqrt(cur); break;
         case ActBackspace: backspace(cur); break;
         case ActEquals:
-            if (g.workspace.commitCurrent()) g.scrollToBottomPending = true;
+            if (g.workspace.commitCurrent(g.values)) g.scrollToBottomPending = true;
             break;
         case ActClear:
             g.workspace.current() = Expression();
@@ -169,6 +184,7 @@ void doAction(int action) {
             break;
         case ActToggleTheme:
             g.dark = !g.dark;
+            setDarkTitleBar(g.hwnd, g.dark);
             break;
         default: break;
     }
@@ -176,15 +192,157 @@ void doAction(int action) {
     InvalidateRect(g.hwnd, nullptr, FALSE);
 }
 
-// ------------------------------------------------------------- painting
-
-RECT themeToggleRect() {
+RECT topActionRect(int right, int width) {
     RECT r = g.topBarRect;
-    r.left = r.right - 60;
-    r.right -= 8;
+    r.left = right - width;
+    r.right = right;
     r.top += 6;
     r.bottom -= 6;
     return r;
+}
+
+void setDarkTitleBar(HWND hwnd, bool dark) {
+    BOOL enabled = dark ? TRUE : FALSE;
+    // Attribute 20 is used by Windows 10 1903+; older systems simply reject it.
+    HRESULT result = DwmSetWindowAttribute(hwnd, 20, &enabled, sizeof(enabled));
+    if (FAILED(result)) DwmSetWindowAttribute(hwnd, 19, &enabled, sizeof(enabled));
+}
+
+HICON createAppIcon() {
+    constexpr int size = 32;
+    std::vector<DWORD> pixels(size * size, RGB(0x00, 0x78, 0xD4));
+    for (int y = 3; y < size - 3; ++y) {
+        for (int x = 3; x < size - 3; ++x) {
+            if (x == 3 || y == 3 || x == size - 4 || y == size - 4)
+                pixels[y * size + x] = RGB(0x00, 0x3B, 0x6F);
+        }
+    }
+    for (int y = 8; y < 24; ++y) {
+        for (int x = 14; x < 18; ++x) pixels[y * size + x] = RGB(255, 255, 255);
+    }
+    for (int y = 14; y < 18; ++y) {
+        for (int x = 8; x < 24; ++x) pixels[y * size + x] = RGB(255, 255, 255);
+    }
+    HBITMAP color = CreateBitmap(size, size, 1, 32, pixels.data());
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&info);
+    DeleteObject(color);
+    DeleteObject(mask);
+    return icon;
+}
+
+struct QuadraticDialogState {
+    HWND hwnd = nullptr;
+    HWND a = nullptr;
+    HWND b = nullptr;
+    HWND c = nullptr;
+    bool accepted = false;
+    double values[3]{};
+};
+
+LRESULT CALLBACK quadraticDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<QuadraticDialogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        state = reinterpret_cast<QuadraticDialogState*>(cs->lpCreateParams);
+        state->hwnd = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_CREATE) {
+        CreateWindowW(L"STATIC", L"a", WS_CHILD | WS_VISIBLE, 18, 18, 22, 22, hwnd, nullptr, nullptr, nullptr);
+        CreateWindowW(L"STATIC", L"b", WS_CHILD | WS_VISIBLE, 18, 58, 22, 22, hwnd, nullptr, nullptr, nullptr);
+        CreateWindowW(L"STATIC", L"c", WS_CHILD | WS_VISIBLE, 18, 98, 22, 22, hwnd, nullptr, nullptr, nullptr);
+        state->a = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 48, 15, 150, 26, hwnd, (HMENU)101, nullptr, nullptr);
+        state->b = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 48, 55, 150, 26, hwnd, (HMENU)102, nullptr, nullptr);
+        state->c = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 48, 95, 150, 26, hwnd, (HMENU)103, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Solve", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 48, 137, 72, 28, hwnd, (HMENU)104, nullptr, nullptr);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 126, 137, 72, 28, hwnd, (HMENU)105, nullptr, nullptr);
+        SetFocus(state->a);
+        return 0;
+    }
+    if (msg == WM_COMMAND && LOWORD(wParam) == 104) {
+        wchar_t text[64];
+        HWND edits[3] = { state->a, state->b, state->c };
+        for (int i = 0; i < 3; ++i) {
+            GetWindowTextW(edits[i], text, 64);
+            wchar_t* end = nullptr;
+            state->values[i] = std::wcstod(text, &end);
+            if (end == text || !std::isfinite(state->values[i])) return 0;
+        }
+        state->accepted = true;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    if (msg == WM_COMMAND && LOWORD(wParam) == 105) {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool promptQuadratic(HWND owner, double& a, double& b, double& c) {
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = quadraticDialogProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = L"NaturalCalculatorQuadraticDialog";
+        RegisterClassW(&wc);
+        registered = true;
+    }
+    QuadraticDialogState state;
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NaturalCalculatorQuadraticDialog",
+                                  L"Solve ax^2 + bx + c = 0", WS_CAPTION | WS_SYSMENU,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 240, 210, owner, nullptr,
+                                  GetModuleHandleW(nullptr), &state);
+    if (!dialog) return false;
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    MSG msg;
+    while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    if (state.accepted) { a = state.values[0]; b = state.values[1]; c = state.values[2]; }
+    return state.accepted;
+}
+
+std::wstring formatQuadraticResult(const QuadraticResult& result) {
+    if (!result.valid) return std::wstring(result.message.begin(), result.message.end());
+    std::wostringstream out;
+    out << std::setprecision(10);
+    if (result.rootCount == 0) return L"No real solutions";
+    out << L"x1 = " << result.first;
+    if (result.rootCount == 2) out << L"\n x2 = " << result.second;
+    return out.str();
+}
+
+void solveQuadraticFromDialog() {
+    double a, b, c;
+    if (!promptQuadratic(g.hwnd, a, b, c)) return;
+    QuadraticResult result = solveQuadratic(a, b, c);
+    MessageBoxW(g.hwnd, formatQuadraticResult(result).c_str(), L"Quadratic result", MB_OK | MB_ICONINFORMATION);
+}
+
+// ------------------------------------------------------------- painting
+
+RECT topActionRect(int right, int width);
+
+RECT themeToggleRect() {
+    return topActionRect(g.topBarRect.right - 8, 52);
 }
 
 void paintButton(HDC hdc, const ButtonDef& b, const Theme& theme) {
@@ -233,6 +391,28 @@ void paint(HDC hdc, RECT client) {
         RECT r = g.topBarRect; r.left += 12;
         DrawTextW(mem, L"Natural Calculator", -1, &r, DT_VCENTER | DT_SINGLELINE);
         SelectObject(mem, old);
+    }
+    {
+        RECT xr = topActionRect(g.topBarRect.right - 68, 28);
+        RECT yr = topActionRect(g.topBarRect.right - 100, 28);
+        RECT qr = topActionRect(g.topBarRect.right - 132, 76);
+        const std::pair<RECT, const wchar_t*> actions[] = {
+            { xr, L"x" }, { yr, L"y" }, { qr, L"Quadratic" }
+        };
+        for (const auto& action : actions) {
+            RECT actionRect = action.first;
+            HBRUSH b = CreateSolidBrush(theme.panelBackground);
+            HPEN p = CreatePen(PS_SOLID, 1, theme.divider);
+            HBRUSH ob = (HBRUSH)SelectObject(mem, b);
+            HPEN op = (HPEN)SelectObject(mem, p);
+            RoundRect(mem, actionRect.left, actionRect.top, actionRect.right, actionRect.bottom, 8, 8);
+            SelectObject(mem, ob); SelectObject(mem, op);
+            DeleteObject(b); DeleteObject(p);
+            SetTextColor(mem, theme.text);
+            HFONT old = (HFONT)SelectObject(mem, g.uiFontSmall);
+            DrawTextW(mem, action.second, -1, &actionRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(mem, old);
+        }
     }
     {
         RECT tr = themeToggleRect();
@@ -348,6 +528,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
             g.hwnd = hwnd;
+            setDarkTitleBar(hwnd, g.dark);
             g.uiFont = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                     DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
                                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -393,7 +574,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             RECT toggleRect = themeToggleRect();
+            RECT xRect = topActionRect(g.topBarRect.right - 68, 28);
+            RECT yRect = topActionRect(g.topBarRect.right - 100, 28);
+            RECT quadraticRect = topActionRect(g.topBarRect.right - 132, 76);
             if (PtInRect(&toggleRect, pt)) { doAction(ActToggleTheme); return 0; }
+            if (PtInRect(&xRect, pt)) { doAction(ActVariableX); return 0; }
+            if (PtInRect(&yRect, pt)) { doAction(ActVariableY); return 0; }
+            if (PtInRect(&quadraticRect, pt)) { solveQuadraticFromDialog(); return 0; }
             for (auto& b : g.buttons) {
                 if (PtInRect(&b.rect, pt)) { doAction(b.action); return 0; }
             }
@@ -423,6 +610,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case L'(': doAction(ActOpenParen); return 0;
                 case L')': doAction(ActCloseParen); return 0;
                 case L'^': doAction(ActPower); return 0;
+                case L'=': insertEquals(g.workspace.current()); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                case L'x': case L'X': doAction(ActVariableX); return 0;
+                case L'y': case L'Y': doAction(ActVariableY); return 0;
                 default: return 0;
             }
         }
@@ -432,9 +622,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (wParam) {
                 case VK_LEFT: moveLeft(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
                 case VK_RIGHT: moveRight(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
-                case VK_UP: moveUp(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                case VK_UP:
+                    if (!g.workspace.recallPrevious()) moveUp(cur);
+                    ensureCaretVisible();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
                 case VK_DOWN: moveDown(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
-                case VK_DELETE: doDelete(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                case VK_DELETE: {
+                    DWORD now = GetTickCount();
+                    if (now - g.lastDeleteTick <= 600) {
+                        g.workspace.clearAll();
+                        g.values = EvaluationContext{};
+                        g.scrollY = 0;
+                        g.scrollToBottomPending = false;
+                        g.lastDeleteTick = 0;
+                    } else {
+                        doDelete(cur);
+                        g.lastDeleteTick = now;
+                    }
+                    ensureCaretVisible();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 case VK_ESCAPE: doAction(ActClear); return 0;
                 default: return 0;
             }
@@ -442,6 +651,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_DESTROY:
             KillTimer(hwnd, kCaretTimerId);
+            if (g.appIcon) DestroyIcon(g.appIcon);
             if (g.uiFont) DeleteObject(g.uiFont);
             if (g.uiFontSmall) DeleteObject(g.uiFontSmall);
             shutdownFonts();
@@ -462,7 +672,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr; // we paint everything ourselves
     wc.lpszClassName = L"NaturalCalcWindowClass";
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    g.appIcon = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                  32, 32, LR_DEFAULTSIZE);
+    if (!g.appIcon) g.appIcon = createAppIcon();
+    wc.hIcon = g.appIcon;
+    wc.hIconSm = g.appIcon;
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(
@@ -470,6 +684,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 400, 640,
         nullptr, nullptr, hInstance, nullptr);
+    SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g.appIcon);
+    SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g.appIcon);
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
