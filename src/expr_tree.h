@@ -25,7 +25,7 @@
 enum class ItemType {
     Number,     // a run of digits and at most one '.'
     Variable,   // a named numeric variable (currently x or y)
-    Operator,   // + - * (leaf glyph; division never appears here, see Fraction)
+    Operator,   // + - * ! (leaf glyph; division never appears here, see Fraction)
     Equals,     // equation separator
     Fraction,   // a/b  -> child rows: numerator (a), denominator (b)
     Paren,      // (a)  -> child row: inner (a).  b unused.
@@ -90,6 +90,9 @@ struct Expression {
 
 // Copy an expression tree for history recall without sharing editable state.
 std::unique_ptr<Expression> cloneExpression(const Expression& source);
+
+std::string rowRangeToPlainString(const Row* row, int begin, int end);
+void deleteRange(Expression& expression, Cursor first, Cursor last);
 
 // ---- Editing operations -------------------------------------------------
 // All operations act on `expr.cursor` and mutate the tree in place.

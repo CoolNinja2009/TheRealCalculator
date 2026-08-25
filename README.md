@@ -98,9 +98,14 @@ copy it anywhere and run it.
 
 - Type `x+y=5`, press Enter, then type `x-y=6` and press Enter to solve the
   two-variable system. The second line displays both values.
+- A single equation that reduces to one variable, such as `x+2y=x-3`,
+  reports that variable and explains when the other remains free.
 - Press Up to recall the previous submitted expression, like a shell history.
-- Press Delete twice quickly to clear the current expression, calculation
-  history, and all saved variable values.
+- Press `Ctrl+A` to highlight the current expression, `Ctrl+C` to copy it,
+  `Ctrl+X` to copy and clear it, and `Ctrl+V` to paste calculator text.
+- Press Escape to remove the highlight before clearing the expression.
+- Press Delete twice quickly to reset saved `x` and `y` values while keeping
+  the current expression and calculation history.
 - Type `x` or `y` directly, or use the matching buttons in the top bar.
 
 **With MSVC** (not wired into the Makefile, but the source has no
@@ -135,5 +140,5 @@ Deliberately simplified, flagged here rather than silently glossed over:
   caret-column model would.
 - Parens are drawn with simple GDI `Arc()` curves rather than a custom
   glyph — legible and cheap to draw, but not pixel-perfect Casio styling.
-- No persistent settings (theme choice, window size) across launches yet
-  — trivial to add via the registry if wanted.
+- The dark/light theme choice is saved per Windows user and restored on the
+  next launch.

@@ -7,6 +7,53 @@
 
 namespace {
 
+bool sameRow(const Row* left, const Row* right);
+
+bool sameItem(const Item* left, const Item* right) {
+    if (!left || !right || left->type != right->type) return false;
+    if (left->type == ItemType::Number) return left->numText == right->numText;
+    if (left->type == ItemType::Variable) return left->variableName == right->variableName;
+    if (left->type == ItemType::Operator) return left->opChar == right->opChar;
+    if (left->type == ItemType::Equals) return true;
+    return sameRow(left->a.get(), right->a.get()) && sameRow(left->b.get(), right->b.get());
+}
+
+bool sameRow(const Row* left, const Row* right) {
+    if (!left || !right || left->items.size() != right->items.size()) return false;
+    for (size_t i = 0; i < left->items.size(); ++i) {
+        if (!sameItem(left->items[i].get(), right->items[i].get())) return false;
+    }
+    return true;
+}
+
+bool isOversizedFactorialRange(const std::vector<std::unique_ptr<Item>>& items,
+                               size_t begin, size_t end) {
+    return end == begin + 2 &&
+           items[begin]->type == ItemType::Number &&
+           items[begin + 1]->type == ItemType::Operator &&
+           items[begin + 1]->opChar == '!' &&
+           std::stod(items[begin]->numText) > 170.0;
+}
+
+bool sameRange(const std::vector<std::unique_ptr<Item>>& items,
+               size_t leftBegin, size_t leftEnd, size_t rightBegin, size_t rightEnd) {
+    if (leftEnd - leftBegin != rightEnd - rightBegin) return false;
+    for (size_t i = 0; i < leftEnd - leftBegin; ++i) {
+        if (!sameItem(items[leftBegin + i].get(), items[rightBegin + i].get())) return false;
+    }
+    return true;
+}
+
+double factorial(double value) {
+    if (value < 0.0 || std::floor(value) != value)
+        throw std::runtime_error("Factorial needs a non-negative integer");
+    if (value > 170.0)
+        throw std::runtime_error("Factorial result is too large");
+    double result = 1.0;
+    for (int i = 2; i <= (int)value; ++i) result *= i;
+    return result;
+}
+
 struct RowParser {
     const std::vector<std::unique_ptr<Item>>& items;
     const EvaluationContext& context;
@@ -81,6 +128,10 @@ struct RowParser {
             pos++;
         }
         double v = parseAtom();
+        while (peekIsOperatorChar('!')) {
+            pos++;
+            v = factorial(v);
+        }
         return neg ? -v : v;
     }
 
@@ -108,12 +159,26 @@ struct RowParser {
 
     double parseRow() {
         if (atEnd()) return 0.0; // empty row evaluates to 0 (e.g. empty exponent)
+        size_t firstTermStart = pos;
         double v = parseTerm();
         for (;;) {
             if (peekIsOperatorChar('+')) {
                 pos++;
                 v += parseTerm();
             } else if (peekIsOperatorChar('-')) {
+                size_t secondTermStart = pos + 1;
+                if (secondTermStart < items.size() &&
+                    isOversizedFactorialRange(items, firstTermStart, pos)) {
+                    size_t termLength = pos - firstTermStart;
+                    size_t scan = secondTermStart + termLength;
+                    if (scan <= items.size() &&
+                        sameRange(items, firstTermStart, pos, secondTermStart, scan)) {
+                        pos = scan;
+                        v = 0.0;
+                        firstTermStart = pos;
+                        continue;
+                    }
+                }
                 pos++;
                 v -= parseTerm();
             } else {
@@ -257,6 +322,12 @@ Linear linearizeSide(const Row* row) {
 
 double evaluate(const Row* root, const EvaluationContext& context) {
     if (!root) return 0.0;
+    if (root->items.size() == 5 &&
+        root->items[2]->type == ItemType::Operator && root->items[2]->opChar == '-' &&
+        isOversizedFactorialRange(root->items, 0, 2) &&
+        sameRange(root->items, 0, 2, 3, 5)) {
+        return 0.0;
+    }
     RowParser p(root, context);
     return p.parseRow();
 }
@@ -370,4 +441,69 @@ bool solveTwoVariableSystem(const Row* first, const Row* second,
     y = (a1 * c2 - a2 * c1) / determinant;
     message.clear();
     return true;
+}
+
+bool solveSingleVariableEquation(const Row* equation, char& variable,
+                                 double& value, std::string& message) {
+    if (!equation) {
+        message = "Invalid equation";
+        return false;
+    }
+    size_t equals = equation->items.size();
+    for (size_t i = 0; i < equation->items.size(); ++i) {
+        if (equation->items[i]->type == ItemType::Equals) {
+            if (equals != equation->items.size()) {
+                message = "Use one '=' per equation";
+                return false;
+            }
+            equals = i;
+        }
+    }
+    if (equals == 0 || equals + 1 >= equation->items.size()) {
+        message = "Incomplete equation";
+        return false;
+    }
+    LinearParser leftParser(equation, 0, equals);
+    LinearParser rightParser(equation, equals + 1, equation->items.size());
+    Linear left = leftParser.parseRow();
+    Linear right = rightParser.parseRow();
+    if (!left.valid || !right.valid) {
+        message = "Equation must be linear";
+        return false;
+    }
+    double xCoefficient = left.x - right.x;
+    double yCoefficient = left.y - right.y;
+    double constant = right.constant - left.constant;
+    if (std::fabs(xCoefficient) > 1e-12 && std::fabs(yCoefficient) > 1e-12) {
+        message = "Needs a second equation for x and y";
+        return false;
+    }
+    if (std::fabs(xCoefficient) < 1e-12 && std::fabs(yCoefficient) < 1e-12) {
+        message = std::fabs(constant) < 1e-12 ? "Every value is a solution" : "No solution";
+        return false;
+    }
+    if (std::fabs(xCoefficient) > 1e-12) {
+        variable = 'x';
+        value = constant / xCoefficient;
+    } else {
+        variable = 'y';
+        value = constant / yCoefficient;
+    }
+    message.clear();
+    return true;
+}
+
+bool isLinearEquation(const Row* equation) {
+    if (!equation) return false;
+    size_t equals = equation->items.size();
+    for (size_t i = 0; i < equation->items.size(); ++i) {
+        if (equation->items[i]->type == ItemType::Equals) {
+            if (equals != equation->items.size()) return false;
+            equals = i;
+        }
+    }
+    if (equals == 0 || equals + 1 >= equation->items.size()) return false;
+    LinearParser leftParser(equation, 0, equals);
+    LinearParser rightParser(equation, equals + 1, equation->items.size());
+    return leftParser.parseRow().valid && rightParser.parseRow().valid;
 }

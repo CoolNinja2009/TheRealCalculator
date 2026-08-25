@@ -1,6 +1,7 @@
 // expr_tree.cpp
 #include "expr_tree.h"
 #include <cassert>
+#include <algorithm>
 
 // ---------------------------------------------------------------- helpers
 
@@ -104,6 +105,28 @@ std::string Expression::toPlainString() const {
     std::string out;
     serializeRow(root.get(), out);
     return out;
+}
+
+std::string rowRangeToPlainString(const Row* row, int begin, int end) {
+    std::string out;
+    if (!row) return out;
+    begin = std::max(0, begin);
+    end = std::min((int)row->items.size(), end);
+    for (int i = begin; i < end; ++i) serializeItem(row->items[i].get(), out);
+    return out;
+}
+
+void deleteRange(Expression& expression, Cursor first, Cursor last) {
+    if (!first.row || first.row != last.row) return;
+    int begin = std::min(first.index, last.index);
+    int end = std::max(first.index, last.index);
+    begin = std::max(0, begin);
+    end = std::min((int)first.row->items.size(), end);
+    if (begin >= end) return;
+    first.row->items.erase(first.row->items.begin() + begin,
+                           first.row->items.begin() + end);
+    expression.cursor.row = first.row;
+    expression.cursor.index = begin;
 }
 
 static std::unique_ptr<Row> cloneRow(const Row* source, Item* owner, Row* parent) {

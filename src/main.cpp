@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <winreg.h>
 #include <dwmapi.h>
 #include <string>
 #include <vector>
@@ -18,6 +19,8 @@
 #include <cmath>
 #include <utility>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
 #include "expr_tree.h"
 #include "layout.h"
 #include "evaluator.h"
@@ -53,6 +56,9 @@ struct App {
     int scrollY = 0;
     bool scrollToBottomPending = false;
     DWORD lastDeleteTick = 0;
+    bool allSelected = false;
+    bool rangeSelected = false;
+    Cursor selectionAnchor;
     EvaluationContext values;
     std::vector<ButtonDef> buttons;
     RECT topBarRect{}, historyRect{}, editorRect{}, buttonAreaRect{};
@@ -64,8 +70,33 @@ struct App {
 constexpr UINT_PTR kCaretTimerId = 1;
 constexpr int kMinWidth = 340;
 constexpr int kMinHeight = 480;
+constexpr wchar_t kSettingsKey[] = L"Software\\NaturalCalculator";
+constexpr wchar_t kDarkModeValue[] = L"DarkMode";
 
 void setDarkTitleBar(HWND hwnd, bool dark);
+
+bool loadDarkMode() {
+    HKEY key = nullptr;
+    DWORD value = 0;
+    DWORD valueSize = sizeof(value);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+    LONG result = RegQueryValueExW(key, kDarkModeValue, nullptr, nullptr,
+                                   reinterpret_cast<BYTE*>(&value), &valueSize);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS && value != 0;
+}
+
+void saveDarkMode(bool dark) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+    DWORD value = dark ? 1 : 0;
+    RegSetValueExW(key, kDarkModeValue, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(key);
+}
 
 // ------------------------------------------------------------- layout
 
@@ -149,6 +180,14 @@ void ensureCaretVisible() {
 }
 
 void doAction(int action) {
+    bool editsExpression = action != ActToggleTheme && action != ActEquals;
+    if ((g.allSelected || g.rangeSelected) && editsExpression) {
+        if (g.rangeSelected) deleteRange(g.workspace.current(), g.selectionAnchor,
+                                          g.workspace.current().cursor);
+        else g.workspace.current() = Expression();
+        g.allSelected = false;
+        g.rangeSelected = false;
+    }
     Expression& cur = g.workspace.current();
     switch (action) {
         case ActDigit0: insertDigit(cur, '0'); break;
@@ -174,20 +213,77 @@ void doAction(int action) {
         case ActSqrt: insertSqrt(cur); break;
         case ActBackspace: backspace(cur); break;
         case ActEquals:
-            if (g.workspace.commitCurrent(g.values)) g.scrollToBottomPending = true;
+            if (g.workspace.commitCurrent(g.values)) {
+                if (g.workspace.hasSolvedValues()) g.values = g.workspace.solvedValues();
+                g.scrollToBottomPending = true;
+            }
             break;
         case ActClear:
             g.workspace.current() = Expression();
+            g.allSelected = false;
             break;
         case ActClearAll:
             g.workspace.clearAll();
+            g.allSelected = false;
             break;
         case ActToggleTheme:
             g.dark = !g.dark;
+            saveDarkMode(g.dark);
             setDarkTitleBar(g.hwnd, g.dark);
             break;
         default: break;
     }
+    ensureCaretVisible();
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+}
+
+void copyCurrentExpression() {
+    const Expression& expression = g.workspace.current();
+    std::string plain = g.rangeSelected
+        ? rowRangeToPlainString(expression.root.get(),
+                                std::min(g.selectionAnchor.index, expression.cursor.index),
+                                std::max(g.selectionAnchor.index, expression.cursor.index))
+        : expression.toPlainString();
+    std::wstring text(plain.begin(), plain.end());
+    if (!OpenClipboard(g.hwnd)) return;
+    EmptyClipboard();
+    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (data) {
+        void* target = GlobalLock(data);
+        memcpy(target, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+        GlobalUnlock(data);
+        SetClipboardData(CF_UNICODETEXT, data);
+    }
+    CloseClipboard();
+}
+
+void pasteExpression() {
+    if (!OpenClipboard(g.hwnd)) return;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (!data) { CloseClipboard(); return; }
+    const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(data));
+    if (!text) { CloseClipboard(); return; }
+    Expression& expression = g.workspace.current();
+    if (g.allSelected) {
+        expression = Expression();
+        g.allSelected = false;
+    } else if (g.rangeSelected) {
+        deleteRange(expression, g.selectionAnchor, expression.cursor);
+        g.rangeSelected = false;
+    }
+    for (const wchar_t* p = text; *p; ++p) {
+        if (*p >= L'0' && *p <= L'9') insertDigit(expression, (char)*p);
+        else if (*p == L'x' || *p == L'X' || *p == L'y' || *p == L'Y') insertVariable(expression, (char)std::tolower((char)*p));
+        else if (*p == L'.') insertDigit(expression, '.');
+        else if (*p == L'+' || *p == L'-' || *p == L'*' || *p == L'!') insertOperator(expression, (char)*p);
+        else if (*p == L'=') insertEquals(expression);
+        else if (*p == L'(') insertOpenParen(expression);
+        else if (*p == L')') insertCloseParen(expression);
+    }
+    GlobalUnlock(data);
+    CloseClipboard();
+    g.allSelected = false;
+    g.rangeSelected = false;
     ensureCaretVisible();
     InvalidateRect(g.hwnd, nullptr, FALSE);
 }
@@ -495,6 +591,13 @@ void paint(HDC hdc, RECT client) {
         Size s = measureExpression(mem, cur.root.get());
         int midY = (g.editorRect.top + g.editorRect.bottom) / 2;
         int baseline = midY + (s.ascent - s.descent) / 2;
+        if ((g.allSelected || g.rangeSelected) && !rowIsEmpty(cur.root.get())) {
+            RECT selection = { g.editorRect.left + 12, baseline - s.ascent - 4,
+                               g.editorRect.left + 20 + s.width, baseline + s.descent + 4 };
+            HBRUSH selectionBrush = CreateSolidBrush(theme.isDark ? RGB(0x16, 0x4E, 0x73) : RGB(0xC7, 0xE8, 0xFF));
+            FillRect(mem, &selection, selectionBrush);
+            DeleteObject(selectionBrush);
+        }
         CaretInfo caret;
         drawExpression(mem, cur.root.get(), g.editorRect.left + 16, baseline, theme, &cur.cursor, &caret);
 
@@ -610,6 +713,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case L'(': doAction(ActOpenParen); return 0;
                 case L')': doAction(ActCloseParen); return 0;
                 case L'^': doAction(ActPower); return 0;
+                case L'!': insertOperator(g.workspace.current(), '!'); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
                 case L'=': insertEquals(g.workspace.current()); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
                 case L'x': case L'X': doAction(ActVariableX); return 0;
                 case L'y': case L'Y': doAction(ActVariableY); return 0;
@@ -619,9 +723,42 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_KEYDOWN: {
             Expression& cur = g.workspace.current();
+            bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (control && wParam == 'A') {
+                g.allSelected = !rowIsEmpty(cur.root.get());
+                InvalidateRect(hwnd, &g.editorRect, FALSE);
+                return 0;
+            }
+            if (control && wParam == 'C') { copyCurrentExpression(); return 0; }
+            if (control && wParam == 'X') {
+                copyCurrentExpression();
+                if (g.rangeSelected) deleteRange(cur, g.selectionAnchor, cur.cursor);
+                else cur = Expression();
+                g.allSelected = false;
+                g.rangeSelected = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (control && wParam == 'V') { pasteExpression(); return 0; }
             switch (wParam) {
-                case VK_LEFT: moveLeft(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
-                case VK_RIGHT: moveRight(cur); ensureCaretVisible(); InvalidateRect(hwnd, nullptr, FALSE); return 0;
+                case VK_LEFT:
+                case VK_RIGHT: {
+                    bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    if (shift && cur.cursor.row == cur.root.get()) {
+                        if (!g.rangeSelected) g.selectionAnchor = cur.cursor;
+                        if (wParam == VK_LEFT) moveLeft(cur); else moveRight(cur);
+                        g.rangeSelected = g.selectionAnchor.row == cur.cursor.row &&
+                                          g.selectionAnchor.index != cur.cursor.index;
+                        g.allSelected = false;
+                    } else {
+                        if (wParam == VK_LEFT) moveLeft(cur); else moveRight(cur);
+                        g.rangeSelected = false;
+                        g.allSelected = false;
+                    }
+                    ensureCaretVisible();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
                 case VK_UP:
                     if (!g.workspace.recallPrevious()) moveUp(cur);
                     ensureCaretVisible();
@@ -631,10 +768,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_DELETE: {
                     DWORD now = GetTickCount();
                     if (now - g.lastDeleteTick <= 600) {
-                        g.workspace.clearAll();
+                        g.workspace.clearVariables();
                         g.values = EvaluationContext{};
-                        g.scrollY = 0;
-                        g.scrollToBottomPending = false;
                         g.lastDeleteTick = 0;
                     } else {
                         doDelete(cur);
@@ -644,7 +779,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
-                case VK_ESCAPE: doAction(ActClear); return 0;
+                case VK_ESCAPE:
+                    if (g.allSelected) {
+                        g.allSelected = false;
+                        InvalidateRect(hwnd, &g.editorRect, FALSE);
+                    } else {
+                        doAction(ActClear);
+                    }
+                    return 0;
                 default: return 0;
             }
         }
@@ -664,6 +806,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    g.dark = loadDarkMode();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;

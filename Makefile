@@ -22,9 +22,9 @@ OBJECTS  := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
 CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -municode -mwindows -DUNICODE -D_UNICODE
 LDFLAGS  := -static -static-libgcc -static-libstdc++ -municode -mwindows -s
-LIBS     := -lgdi32 -luser32 -lkernel32 -ldwmapi -lcomctl32 -lcomdlg32
+LIBS     := -lgdi32 -luser32 -lkernel32 -ldwmapi -ladvapi32 -lcomctl32 -lcomdlg32
 
-.PHONY: all clean run
+.PHONY: all clean run test
 
 all: $(TARGET)
 
@@ -43,3 +43,7 @@ $(TARGET): $(OBJECTS) $(RC_OBJECT)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+test:
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Isrc src/expr_tree.cpp src/evaluator.cpp src/workspace.cpp tests/calculator_tests.cpp -o $(BUILD_DIR)/calculator_tests.exe
+	$(BUILD_DIR)/calculator_tests.exe

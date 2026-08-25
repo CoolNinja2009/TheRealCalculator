@@ -5,13 +5,27 @@
 
 bool Workspace::commitCurrent(const EvaluationContext& context) {
     if (rowIsEmpty(current_->root.get())) return false;
+    solvedValues_ = context;
+    hasSolvedValues_ = true;
 
     auto entry = std::make_unique<HistoryEntry>();
     entry->expr = std::move(current_);
 
     if (hasEquals(entry->expr->root.get())) {
-        entry->result = "Equation stored";
-        entry->isError = false;
+        char variable = 0;
+        double value = 0.0;
+        std::string message;
+        if (solveSingleVariableEquation(entry->expr->root.get(), variable, value, message)) {
+            char result[96];
+            std::snprintf(result, sizeof(result), "%c = %.10g (the other variable is free)", variable, value);
+            entry->result = result;
+            entry->isError = false;
+            if (variable == 'x') solvedValues_.x = value;
+            else solvedValues_.y = value;
+        } else {
+            entry->result = message;
+            entry->isError = false;
+        }
     } else {
         try {
             double v = evaluate(entry->expr->root.get(), context);
@@ -26,6 +40,8 @@ bool Workspace::commitCurrent(const EvaluationContext& context) {
 
     history_.push_back(std::move(entry));
     if (history_.size() >= 2 &&
+        isLinearEquation(history_[history_.size() - 2]->expr->root.get()) &&
+        isLinearEquation(history_.back()->expr->root.get()) &&
         hasEquals(history_[history_.size() - 2]->expr->root.get()) &&
         hasEquals(history_.back()->expr->root.get())) {
         double x = 0.0, y = 0.0;
@@ -36,6 +52,8 @@ bool Workspace::commitCurrent(const EvaluationContext& context) {
             std::snprintf(result, sizeof(result), "x = %.10g, y = %.10g", x, y);
             history_.back()->result = result;
             history_.back()->isError = false;
+            solvedValues_ = { x, y };
+            hasSolvedValues_ = true;
         } else {
             history_.back()->result = message;
             history_.back()->isError = true;

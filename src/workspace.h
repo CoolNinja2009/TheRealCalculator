@@ -33,14 +33,25 @@ public:
     // Recall the previous committed expression into the editable line.
     bool recallPrevious();
 
+    bool hasSolvedValues() const { return hasSolvedValues_; }
+    const EvaluationContext& solvedValues() const { return solvedValues_; }
+
+    void clearVariables() {
+        solvedValues_ = EvaluationContext{};
+        hasSolvedValues_ = true;
+    }
+
     void clearAll() {
         history_.clear();
         current_ = std::make_unique<Expression>();
         recallIndex_ = 0;
+        hasSolvedValues_ = false;
     }
 
 private:
     std::vector<std::unique_ptr<HistoryEntry>> history_;
     std::unique_ptr<Expression> current_;
     size_t recallIndex_ = 0;
+    EvaluationContext solvedValues_;
+    bool hasSolvedValues_ = false;
 };

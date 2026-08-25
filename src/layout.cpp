@@ -136,6 +136,7 @@ const wchar_t* opGlyph(char c) {
         case '+': return L" + ";
         case '-': return L" \u2212 ";
         case '*': return L" \u00D7 ";
+        case '!': return L"!";
         default: return L" ";
     }
 }
@@ -343,16 +344,24 @@ void drawItemImpl(HDC hdc, const Item* it, int depth, int x, int baselineY,
             HPEN pen = CreatePen(PS_SOLID, std::max(1, scaledPx(2, depth) / 2), theme.text);
             HPEN old = (HPEN)SelectObject(hdc, pen);
             HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            // Simple curved-look parens using arcs.
+            // Keep the curves inside the width reserved by measureItemImpl.
             int midY = (top + bot) / 2;
-            int rH = (bot - top) / 2;
-            Arc(hdc, x - rH / 2, top, x + glyphW, bot, x + glyphW, top, x + glyphW, bot);
+            POINT leftParen[] = {
+                { x + glyphW, top }, { x + glyphW / 2, top + (midY - top) / 2 },
+                { x, midY }, { x + glyphW / 2, midY + (bot - midY) / 2 },
+                { x + glyphW, bot }
+            };
             int rx = x + inner.width + glyphW;
-            Arc(hdc, rx, top, rx + glyphW + rH / 2, bot, rx, bot, rx, top);
+            POINT rightParen[] = {
+                { rx, top }, { rx + glyphW / 2, top + (midY - top) / 2 },
+                { rx + glyphW, midY }, { rx + glyphW / 2, midY + (bot - midY) / 2 },
+                { rx, bot }
+            };
+            Polyline(hdc, leftParen, ARRAYSIZE(leftParen));
+            Polyline(hdc, rightParen, ARRAYSIZE(rightParen));
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, old);
             DeleteObject(pen);
-            (void)midY;
             drawRowImpl(hdc, it->a.get(), depth, x + glyphW, baselineY, theme, cursor, outCaret);
             return;
         }
