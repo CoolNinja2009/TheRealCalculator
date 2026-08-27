@@ -58,11 +58,14 @@ struct RowParser {
     const std::vector<std::unique_ptr<Item>>& items;
     const EvaluationContext& context;
     size_t pos = 0;
+    size_t end = 0;
 
-    RowParser(const Row* row, const EvaluationContext& values)
-        : items(row->items), context(values) {}
+    RowParser(const Row* row, const EvaluationContext& values, size_t begin = 0,
+              size_t finish = static_cast<size_t>(-1))
+        : items(row->items), context(values), pos(begin),
+          end(finish == static_cast<size_t>(-1) ? row->items.size() : finish) {}
 
-    bool atEnd() const { return pos >= items.size(); }
+    bool atEnd() const { return pos >= end; }
     const Item* peek() const { return atEnd() ? nullptr : items[pos].get(); }
 
     bool peekIsOperatorChar(char c) const {
@@ -199,6 +202,133 @@ struct Linear {
 };
 
 Linear linearizeSide(const Row* row);
+
+struct Polynomial {
+    double coefficient[3] = { 0.0, 0.0, 0.0 };
+    bool valid = true;
+};
+
+Polynomial polynomialize(const Row* row);
+
+Polynomial addPolynomial(const Polynomial& left, const Polynomial& right, double sign = 1.0) {
+    Polynomial result;
+    result.valid = left.valid && right.valid;
+    for (int i = 0; i <= 2; ++i) result.coefficient[i] = left.coefficient[i] + sign * right.coefficient[i];
+    return result;
+}
+
+Polynomial multiplyPolynomial(const Polynomial& left, const Polynomial& right) {
+    Polynomial result;
+    result.valid = left.valid && right.valid;
+    for (int degree = 0; degree <= 2; ++degree) {
+        for (int rightDegree = 0; rightDegree <= degree; ++rightDegree)
+            result.coefficient[degree] += left.coefficient[degree - rightDegree] * right.coefficient[rightDegree];
+    }
+    for (int degree = 3; degree <= 4; ++degree) {
+        for (int rightDegree = 0; rightDegree <= degree; ++rightDegree) {
+            int leftDegree = degree - rightDegree;
+            if (leftDegree <= 2 && rightDegree <= 2 &&
+                std::fabs(left.coefficient[leftDegree]) > 1e-12 &&
+                std::fabs(right.coefficient[rightDegree]) > 1e-12)
+                result.valid = false;
+        }
+    }
+    return result;
+}
+
+struct PolynomialParser {
+    const std::vector<std::unique_ptr<Item>>& items;
+    size_t pos;
+    size_t end;
+
+    PolynomialParser(const Row* row, size_t begin, size_t finish)
+        : items(row->items), pos(begin), end(finish) {}
+
+    bool atEnd() const { return pos >= end; }
+    const Item* peek() const { return atEnd() ? nullptr : items[pos].get(); }
+    bool isOperator(char op) const {
+        const Item* item = peek();
+        return item && item->type == ItemType::Operator && item->opChar == op;
+    }
+
+    Polynomial parseAtom() {
+        if (atEnd()) return { { 0, 0, 0 }, false };
+        const Item* item = items[pos++].get();
+        switch (item->type) {
+            case ItemType::Number:
+                try { return { { std::stod(item->numText), 0, 0 }, true }; }
+                catch (...) { return { { 0, 0, 0 }, false }; }
+            case ItemType::Variable:
+                return item->variableName == 'x' ? Polynomial{ { 0, 1, 0 }, true } : Polynomial{ { 0, 0, 0 }, false };
+            case ItemType::Paren:
+                return polynomialize(item->a.get());
+            case ItemType::Power: {
+                Polynomial base = polynomialize(item->a.get());
+                Polynomial exponent = polynomialize(item->b.get());
+                if (!base.valid || !exponent.valid || std::fabs(exponent.coefficient[1]) > 1e-12 ||
+                    std::fabs(exponent.coefficient[2]) > 1e-12 || exponent.coefficient[0] < 0 ||
+                    exponent.coefficient[0] > 2 || std::floor(exponent.coefficient[0]) != exponent.coefficient[0])
+                    return { { 0, 0, 0 }, false };
+                int power = (int)exponent.coefficient[0];
+                Polynomial result{ { 1, 0, 0 }, true };
+                for (int i = 0; i < power; ++i) result = multiplyPolynomial(result, base);
+                return result;
+            }
+            case ItemType::Fraction: {
+                Polynomial numerator = polynomialize(item->a.get());
+                Polynomial denominator = polynomialize(item->b.get());
+                if (!denominator.valid || std::fabs(denominator.coefficient[1]) > 1e-12 ||
+                    std::fabs(denominator.coefficient[2]) > 1e-12 || std::fabs(denominator.coefficient[0]) < 1e-12)
+                    return { { 0, 0, 0 }, false };
+                for (double& coefficient : numerator.coefficient) coefficient /= denominator.coefficient[0];
+                return numerator;
+            }
+            case ItemType::Operator:
+            case ItemType::Equals:
+            case ItemType::Sqrt:
+                return { { 0, 0, 0 }, false };
+        }
+        return { { 0, 0, 0 }, false };
+    }
+
+    Polynomial parseFactor() {
+        bool negative = false;
+        while (isOperator('-') || isOperator('+')) {
+            if (isOperator('-')) negative = !negative;
+            ++pos;
+        }
+        Polynomial value = parseAtom();
+        if (negative) for (double& coefficient : value.coefficient) coefficient = -coefficient;
+        return value;
+    }
+
+    Polynomial parseTerm() {
+        Polynomial value = parseFactor();
+        while (!atEnd()) {
+            if (isOperator('*')) { ++pos; value = multiplyPolynomial(value, parseFactor()); }
+            else if (peek()->type != ItemType::Operator) value = multiplyPolynomial(value, parseFactor());
+            else break;
+        }
+        return value;
+    }
+
+    Polynomial parseRow() {
+        if (atEnd()) return { { 0, 0, 0 }, false };
+        Polynomial value = parseTerm();
+        while (!atEnd()) {
+            if (isOperator('+')) { ++pos; value = addPolynomial(value, parseTerm()); }
+            else if (isOperator('-')) { ++pos; value = addPolynomial(value, parseTerm(), -1.0); }
+            else return { { 0, 0, 0 }, false };
+        }
+        return value;
+    }
+};
+
+Polynomial polynomialize(const Row* row) {
+    if (!row) return { { 0, 0, 0 }, false };
+    PolynomialParser parser(row, 0, row->items.size());
+    return parser.parseRow();
+}
 
 Linear addLinear(const Linear& left, const Linear& right, double sign = 1.0) {
     return { left.x + sign * right.x, left.y + sign * right.y,
@@ -493,6 +623,35 @@ bool solveSingleVariableEquation(const Row* equation, char& variable,
     return true;
 }
 
+bool solveVariableAssignment(const Row* equation, const EvaluationContext& context,
+                             char& variable, double& value, std::string& message) {
+    if (!equation) { message = "Invalid equation"; return false; }
+    size_t equals = equation->items.size();
+    for (size_t i = 0; i < equation->items.size(); ++i) {
+        if (equation->items[i]->type == ItemType::Equals) {
+            if (equals != equation->items.size()) { message = "Use one '=' per equation"; return false; }
+            equals = i;
+        }
+    }
+    if (equals == equation->items.size()) { message = "Missing '='"; return false; }
+    bool variableOnLeft = equals == 1 && equation->items[0]->type == ItemType::Variable;
+    bool variableOnRight = equation->items.size() - equals - 1 == 1 &&
+                           equation->items[equals + 1]->type == ItemType::Variable;
+    if (!variableOnLeft && !variableOnRight) {
+        message = "Assignment needs one variable on one side";
+        return false;
+    }
+    const Item* variableItem = variableOnLeft ? equation->items[0].get() : equation->items[equals + 1].get();
+    size_t begin = variableOnLeft ? equals + 1 : 0;
+    size_t end = variableOnLeft ? equation->items.size() : equals;
+    RowParser parser(equation, context, begin, end);
+    try { value = parser.parseRow(); }
+    catch (const std::exception& error) { message = error.what(); return false; }
+    variable = variableItem->variableName;
+    message.clear();
+    return variable == 'x' || variable == 'y';
+}
+
 bool isLinearEquation(const Row* equation) {
     if (!equation) return false;
     size_t equals = equation->items.size();
@@ -506,4 +665,32 @@ bool isLinearEquation(const Row* equation) {
     LinearParser leftParser(equation, 0, equals);
     LinearParser rightParser(equation, equals + 1, equation->items.size());
     return leftParser.parseRow().valid && rightParser.parseRow().valid;
+}
+
+bool solveQuadraticEquation(const Row* equation, QuadraticResult& result,
+                            std::string& message) {
+    if (!equation) { message = "Invalid equation"; return false; }
+    size_t equals = equation->items.size();
+    for (size_t i = 0; i < equation->items.size(); ++i) {
+        if (equation->items[i]->type == ItemType::Equals) {
+            if (equals != equation->items.size()) { message = "Use one '=' per equation"; return false; }
+            equals = i;
+        }
+    }
+    if (equals == 0 || equals + 1 >= equation->items.size()) {
+        message = "Incomplete equation";
+        return false;
+    }
+    PolynomialParser leftParser(equation, 0, equals);
+    PolynomialParser rightParser(equation, equals + 1, equation->items.size());
+    Polynomial left = leftParser.parseRow();
+    Polynomial right = rightParser.parseRow();
+    if (!left.valid || !right.valid) { message = "Equation must be polynomial in x"; return false; }
+    double a = left.coefficient[2] - right.coefficient[2];
+    double b = left.coefficient[1] - right.coefficient[1];
+    double c = left.coefficient[0] - right.coefficient[0];
+    if (std::fabs(a) < 1e-12) { message = "Not a quadratic equation"; return false; }
+    result = solveQuadratic(a, b, c);
+    message.clear();
+    return true;
 }

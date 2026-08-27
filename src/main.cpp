@@ -59,6 +59,13 @@ struct App {
     bool allSelected = false;
     bool rangeSelected = false;
     Cursor selectionAnchor;
+    bool outputSelecting = false;
+    int outputEntry = -1;
+    int outputAnchor = 0;
+    int outputCaret = 0;
+    bool editorSelecting = false;
+    int editorAnchor = 0;
+    int editorCaret = 0;
     EvaluationContext values;
     std::vector<ButtonDef> buttons;
     RECT topBarRect{}, historyRect{}, editorRect{}, buttonAreaRect{};
@@ -239,7 +246,11 @@ void doAction(int action) {
 
 void copyCurrentExpression() {
     const Expression& expression = g.workspace.current();
-    std::string plain = g.rangeSelected
+    std::string plain = g.editorCaret != g.editorAnchor
+        ? expression.toPlainString().substr(
+              std::min(g.editorAnchor, g.editorCaret),
+              std::max(g.editorAnchor, g.editorCaret) - std::min(g.editorAnchor, g.editorCaret))
+        : g.rangeSelected
         ? rowRangeToPlainString(expression.root.get(),
                                 std::min(g.selectionAnchor.index, expression.cursor.index),
                                 std::max(g.selectionAnchor.index, expression.cursor.index))
@@ -257,6 +268,120 @@ void copyCurrentExpression() {
     CloseClipboard();
 }
 
+int editorCharacterAtPoint(POINT point) {
+    std::string plain = g.workspace.current().toPlainString();
+    HDC hdc = GetDC(g.hwnd);
+    if (!hdc) return 0;
+    HFONT expressionFont = CreateFontW(-fontHeightForDepth(0), 0, 0, 0, FW_NORMAL,
+                                       FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                       OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                       L"Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, expressionFont);
+    int result = 0;
+    int bestDistance = INT_MAX;
+    for (int index = 0; index <= (int)plain.size(); ++index) {
+        std::wstring prefix(plain.begin(), plain.begin() + index);
+        SIZE size{};
+        GetTextExtentPoint32W(hdc, prefix.c_str(), (int)prefix.size(), &size);
+        int distance = std::abs(point.x - (g.editorRect.left + 16 + size.cx));
+        if (distance < bestDistance) { bestDistance = distance; result = index; }
+    }
+    SelectObject(hdc, old);
+    DeleteObject(expressionFont);
+    ReleaseDC(g.hwnd, hdc);
+    return result;
+}
+
+void insertPlainText(Expression& expression, const std::string& text) {
+    for (char character : text) {
+        if (character >= '0' && character <= '9') insertDigit(expression, character);
+        else if (character == 'x' || character == 'y') insertVariable(expression, character);
+        else if (character == '.') insertDigit(expression, character);
+        else if (character == '+' || character == '-' || character == '*' || character == '!')
+            insertOperator(expression, character);
+        else if (character == '/') insertFraction(expression);
+        else if (character == '=') insertEquals(expression);
+        else if (character == '(') insertOpenParen(expression);
+        else if (character == ')') insertCloseParen(expression);
+        else if (character == '^') insertPower(expression);
+    }
+}
+
+void replaceEditorSelection(const std::string& replacement) {
+    Expression& expression = g.workspace.current();
+    std::string plain = expression.toPlainString();
+    int begin = std::min(g.editorAnchor, g.editorCaret);
+    int end = std::max(g.editorAnchor, g.editorCaret);
+    if (begin < 0 || end > (int)plain.size() || begin >= end) return;
+    plain.replace(begin, end - begin, replacement);
+    expression = Expression();
+    insertPlainText(expression, plain);
+    g.editorAnchor = 0;
+    g.editorCaret = 0;
+    g.allSelected = false;
+    g.rangeSelected = false;
+}
+
+std::wstring outputText(int entryIndex) {
+    if (entryIndex < 0 || entryIndex >= (int)g.workspace.history().size()) return {};
+    const std::string& result = g.workspace.history()[entryIndex]->result;
+    return L"= " + std::wstring(result.begin(), result.end());
+}
+
+void copySelectedOutput() {
+    if (g.outputEntry < 0 || g.outputAnchor == g.outputCaret) return;
+    std::wstring text = outputText(g.outputEntry);
+    int begin = std::min(g.outputAnchor, g.outputCaret);
+    int end = std::max(g.outputAnchor, g.outputCaret);
+    text = text.substr(begin, end - begin);
+    if (!OpenClipboard(g.hwnd)) return;
+    EmptyClipboard();
+    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (data) {
+        void* target = GlobalLock(data);
+        memcpy(target, text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+        GlobalUnlock(data);
+        SetClipboardData(CF_UNICODETEXT, data);
+    }
+    CloseClipboard();
+}
+
+bool findOutputAtPoint(POINT point, int& entryIndex, int& characterIndex) {
+    HDC hdc = GetDC(g.hwnd);
+    if (!hdc) return false;
+    const auto& history = g.workspace.history();
+    int pad = 14;
+    int entrySpacing = 10;
+    int y = g.historyRect.top + pad - g.scrollY;
+    for (size_t i = 0; i < history.size(); ++i) {
+        Size size = measureExpression(hdc, history[i]->expr->root.get());
+        int resultTop = y + size.height() + 2;
+        RECT resultRect = { g.historyRect.left + pad, resultTop,
+                            g.historyRect.right - pad, resultTop + 22 };
+        if (PtInRect(&resultRect, point)) {
+            std::wstring text = outputText((int)i);
+            HFONT old = (HFONT)SelectObject(hdc, g.uiFontSmall);
+            int index = 0;
+            int bestDistance = INT_MAX;
+            for (int candidate = 0; candidate <= (int)text.size(); ++candidate) {
+                SIZE prefix{};
+                GetTextExtentPoint32W(hdc, text.c_str(), candidate, &prefix);
+                int distance = std::abs(point.x - (resultRect.left + prefix.cx));
+                if (distance < bestDistance) { bestDistance = distance; index = candidate; }
+            }
+            SelectObject(hdc, old);
+            ReleaseDC(g.hwnd, hdc);
+            entryIndex = (int)i;
+            characterIndex = index;
+            return true;
+        }
+        y += size.height() + entrySpacing + 22 + entrySpacing;
+    }
+    ReleaseDC(g.hwnd, hdc);
+    return false;
+}
+
 void pasteExpression() {
     if (!OpenClipboard(g.hwnd)) return;
     HANDLE data = GetClipboardData(CF_UNICODETEXT);
@@ -264,6 +389,7 @@ void pasteExpression() {
     const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(data));
     if (!text) { CloseClipboard(); return; }
     Expression& expression = g.workspace.current();
+    bool replacingEditorSelection = g.editorCaret != g.editorAnchor;
     if (g.allSelected) {
         expression = Expression();
         g.allSelected = false;
@@ -271,15 +397,10 @@ void pasteExpression() {
         deleteRange(expression, g.selectionAnchor, expression.cursor);
         g.rangeSelected = false;
     }
-    for (const wchar_t* p = text; *p; ++p) {
-        if (*p >= L'0' && *p <= L'9') insertDigit(expression, (char)*p);
-        else if (*p == L'x' || *p == L'X' || *p == L'y' || *p == L'Y') insertVariable(expression, (char)std::tolower((char)*p));
-        else if (*p == L'.') insertDigit(expression, '.');
-        else if (*p == L'+' || *p == L'-' || *p == L'*' || *p == L'!') insertOperator(expression, (char)*p);
-        else if (*p == L'=') insertEquals(expression);
-        else if (*p == L'(') insertOpenParen(expression);
-        else if (*p == L')') insertCloseParen(expression);
-    }
+    std::string pasted;
+    for (const wchar_t* p = text; *p; ++p) pasted += (char)std::tolower((char)*p);
+    if (replacingEditorSelection) replaceEditorSelection(pasted);
+    else insertPlainText(expression, pasted);
     GlobalUnlock(data);
     CloseClipboard();
     g.allSelected = false;
@@ -337,6 +458,7 @@ struct QuadraticDialogState {
     HWND b = nullptr;
     HWND c = nullptr;
     bool accepted = false;
+    bool dark = false;
     double values[3]{};
 };
 
@@ -349,7 +471,9 @@ LRESULT CALLBACK quadraticDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     if (!state) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_ERASEBKGND && state->dark) return 1;
     if (msg == WM_CREATE) {
+        setDarkTitleBar(hwnd, state->dark);
         CreateWindowW(L"STATIC", L"a", WS_CHILD | WS_VISIBLE, 18, 18, 22, 22, hwnd, nullptr, nullptr, nullptr);
         CreateWindowW(L"STATIC", L"b", WS_CHILD | WS_VISIBLE, 18, 58, 22, 22, hwnd, nullptr, nullptr, nullptr);
         CreateWindowW(L"STATIC", L"c", WS_CHILD | WS_VISIBLE, 18, 98, 22, 22, hwnd, nullptr, nullptr, nullptr);
@@ -360,6 +484,17 @@ LRESULT CALLBACK quadraticDialogProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 126, 137, 72, 28, hwnd, (HMENU)105, nullptr, nullptr);
         SetFocus(state->a);
         return 0;
+    }
+    if (msg == WM_CTLCOLORDLG || msg == WM_CTLCOLORSTATIC ||
+        msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORBTN) {
+        if (state->dark) {
+            static HBRUSH background = CreateSolidBrush(RGB(0x20, 0x20, 0x20));
+            static HBRUSH control = CreateSolidBrush(RGB(0x2B, 0x2B, 0x2B));
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(dc, RGB(0xF0, 0xF0, 0xF0));
+            SetBkColor(dc, RGB(0x2B, 0x2B, 0x2B));
+            return reinterpret_cast<LRESULT>(msg == WM_CTLCOLORDLG ? background : control);
+        }
     }
     if (msg == WM_COMMAND && LOWORD(wParam) == 104) {
         wchar_t text[64];
@@ -398,6 +533,7 @@ bool promptQuadratic(HWND owner, double& a, double& b, double& c) {
         registered = true;
     }
     QuadraticDialogState state;
+    state.dark = g.dark;
     HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NaturalCalculatorQuadraticDialog",
                                   L"Solve ax^2 + bx + c = 0", WS_CAPTION | WS_SYSMENU,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 240, 210, owner, nullptr,
@@ -566,6 +702,21 @@ void paint(HDC hdc, RECT client) {
                 std::wstring res = L"= " + std::wstring(hist[i]->result.begin(), hist[i]->result.end());
                 RECT rr = { g.historyRect.left + pad, y + s.height() + 2,
                             g.historyRect.right - pad, y + s.height() + 24 };
+                int selectionBegin = -1;
+                int selectionEnd = -1;
+                if (g.outputEntry == (int)i && g.outputAnchor != g.outputCaret) {
+                    selectionBegin = std::min(g.outputAnchor, g.outputCaret);
+                    selectionEnd = std::max(g.outputAnchor, g.outputCaret);
+                    SIZE before{}, selected{};
+                    GetTextExtentPoint32W(mem, res.c_str(), selectionBegin, &before);
+                    GetTextExtentPoint32W(mem, res.c_str() + selectionBegin,
+                                          selectionEnd - selectionBegin, &selected);
+                    RECT highlight = { rr.left + before.cx, rr.top,
+                                       rr.left + before.cx + selected.cx, rr.bottom };
+                    HBRUSH highlightBrush = CreateSolidBrush(theme.isDark ? RGB(0x16, 0x4E, 0x73) : RGB(0xC7, 0xE8, 0xFF));
+                    FillRect(mem, &highlight, highlightBrush);
+                    DeleteObject(highlightBrush);
+                }
                 DrawTextW(mem, res.c_str(), -1, &rr, DT_LEFT | DT_SINGLELINE);
                 SelectObject(mem, old);
             }
@@ -591,9 +742,34 @@ void paint(HDC hdc, RECT client) {
         Size s = measureExpression(mem, cur.root.get());
         int midY = (g.editorRect.top + g.editorRect.bottom) / 2;
         int baseline = midY + (s.ascent - s.descent) / 2;
-        if ((g.allSelected || g.rangeSelected) && !rowIsEmpty(cur.root.get())) {
-            RECT selection = { g.editorRect.left + 12, baseline - s.ascent - 4,
-                               g.editorRect.left + 20 + s.width, baseline + s.descent + 4 };
+        if ((g.allSelected || g.rangeSelected || g.editorCaret != g.editorAnchor) && !rowIsEmpty(cur.root.get())) {
+            int selectionLeft = g.editorRect.left + 12;
+            int selectionRight = g.editorRect.left + 20 + s.width;
+            if (g.editorCaret != g.editorAnchor && !g.allSelected && !g.rangeSelected) {
+                std::string plain = cur.toPlainString();
+                HDC measure = mem;
+                HFONT oldFont = (HFONT)SelectObject(measure, g.uiFont);
+                std::wstring before(plain.begin(), plain.begin() + std::min(g.editorAnchor, g.editorCaret));
+                std::wstring selected(plain.begin() + std::min(g.editorAnchor, g.editorCaret),
+                                      plain.begin() + std::max(g.editorAnchor, g.editorCaret));
+                SIZE beforeSize{}, selectedSize{};
+                HFONT expressionFont = CreateFontW(-fontHeightForDepth(0), 0, 0, 0, FW_NORMAL,
+                                                   FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                                   OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                                   L"Segoe UI");
+                HFONT previousFont = (HFONT)SelectObject(measure, expressionFont);
+                GetTextExtentPoint32W(measure, before.c_str(), (int)before.size(), &beforeSize);
+                GetTextExtentPoint32W(measure, selected.c_str(), (int)selected.size(), &selectedSize);
+                SelectObject(measure, previousFont);
+                DeleteObject(expressionFont);
+                int origin = g.editorRect.left + 16;
+                selectionLeft = origin + beforeSize.cx;
+                selectionRight = selectionLeft + selectedSize.cx;
+                SelectObject(measure, oldFont);
+            }
+            RECT selection = { selectionLeft, baseline - s.ascent - 4,
+                               selectionRight, baseline + s.descent + 4 };
             HBRUSH selectionBrush = CreateSolidBrush(theme.isDark ? RGB(0x16, 0x4E, 0x73) : RGB(0xC7, 0xE8, 0xFF));
             FillRect(mem, &selection, selectionBrush);
             DeleteObject(selectionBrush);
@@ -674,6 +850,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
+        case WM_SETCURSOR: {
+            if (LOWORD(lParam) != HTCLIENT) return DefWindowProcW(hwnd, msg, wParam, lParam);
+            POINT point;
+            GetCursorPos(&point);
+            ScreenToClient(hwnd, &point);
+            int outputEntry = -1;
+            int outputCharacter = 0;
+            if (findOutputAtPoint(point, outputEntry, outputCharacter) ||
+                PtInRect(&g.editorRect, point)) {
+                SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+                return TRUE;
+            }
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+
         case WM_LBUTTONDOWN: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             RECT toggleRect = themeToggleRect();
@@ -684,12 +876,74 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (PtInRect(&xRect, pt)) { doAction(ActVariableX); return 0; }
             if (PtInRect(&yRect, pt)) { doAction(ActVariableY); return 0; }
             if (PtInRect(&quadraticRect, pt)) { solveQuadraticFromDialog(); return 0; }
+            if (PtInRect(&g.editorRect, pt)) {
+                g.editorSelecting = true;
+                g.editorAnchor = editorCharacterAtPoint(pt);
+                g.editorCaret = g.editorAnchor;
+                g.allSelected = false;
+                g.rangeSelected = false;
+                g.outputEntry = -1;
+                SetCapture(hwnd);
+                SetFocus(hwnd);
+                InvalidateRect(hwnd, &g.editorRect, FALSE);
+                return 0;
+            }
+            int outputEntry = -1;
+            int outputCharacter = 0;
+            if (findOutputAtPoint(pt, outputEntry, outputCharacter)) {
+                g.outputSelecting = true;
+                g.outputEntry = outputEntry;
+                g.outputAnchor = outputCharacter;
+                g.outputCaret = outputCharacter;
+                g.allSelected = false;
+                g.rangeSelected = false;
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, &g.historyRect, FALSE);
+                return 0;
+            }
             for (auto& b : g.buttons) {
                 if (PtInRect(&b.rect, pt)) { doAction(b.action); return 0; }
             }
+            g.outputEntry = -1;
+            g.outputAnchor = 0;
+            g.outputCaret = 0;
             SetFocus(hwnd);
             return 0;
         }
+
+        case WM_MOUSEMOVE:
+            if (g.editorSelecting) {
+                POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                if (PtInRect(&g.editorRect, point)) {
+                    g.editorCaret = editorCharacterAtPoint(point);
+                    InvalidateRect(hwnd, &g.editorRect, FALSE);
+                }
+                return 0;
+            }
+            if (g.outputSelecting) {
+                POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                int entry = -1;
+                int character = 0;
+                if (findOutputAtPoint(point, entry, character) && entry == g.outputEntry) {
+                    g.outputCaret = character;
+                    InvalidateRect(hwnd, &g.historyRect, FALSE);
+                }
+                return 0;
+            }
+            break;
+
+        case WM_LBUTTONUP:
+            if (g.editorSelecting) {
+                g.editorSelecting = false;
+                ReleaseCapture();
+                return 0;
+            }
+            if (g.outputSelecting) {
+                g.outputSelecting = false;
+                ReleaseCapture();
+                return 0;
+            }
+            break;
 
         case WM_MOUSEWHEEL: {
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -701,6 +955,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_CHAR: {
             wchar_t c = (wchar_t)wParam;
+            if (g.editorCaret != g.editorAnchor) {
+                if (c == 8) replaceEditorSelection("");
+                else if ((c >= L'0' && c <= L'9') || c == L'.' || c == L'+' || c == L'-' ||
+                         c == L'*' || c == L'/' || c == L'(' || c == L')' || c == L'^' ||
+                         c == L'!' || c == L'=' || c == L'x' || c == L'X' || c == L'y' || c == L'Y') {
+                    char replacement = (char)c;
+                    if (replacement == '/') replacement = '/';
+                    replaceEditorSelection(std::string(1, replacement));
+                } else return 0;
+                ensureCaretVisible();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (c == 8) { doAction(ActBackspace); return 0; }
             if (c == 13) { doAction(ActEquals); return 0; }
             if (c >= '0' && c <= '9') { doAction(ActDigit0 + (c - '0')); return 0; }
@@ -725,14 +992,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             Expression& cur = g.workspace.current();
             bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (control && wParam == 'A') {
+                g.editorAnchor = 0;
+                g.editorCaret = 0;
+                g.outputEntry = -1;
+                g.outputAnchor = 0;
+                g.outputCaret = 0;
                 g.allSelected = !rowIsEmpty(cur.root.get());
-                InvalidateRect(hwnd, &g.editorRect, FALSE);
+                InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            if (control && wParam == 'C') { copyCurrentExpression(); return 0; }
+            if (control && wParam == 'C') {
+                if (g.outputEntry >= 0 && g.outputAnchor != g.outputCaret) copySelectedOutput();
+                else copyCurrentExpression();
+                return 0;
+            }
             if (control && wParam == 'X') {
+                if (g.outputEntry >= 0 && g.outputAnchor != g.outputCaret) return 0;
                 copyCurrentExpression();
-                if (g.rangeSelected) deleteRange(cur, g.selectionAnchor, cur.cursor);
+                if (g.editorCaret != g.editorAnchor) replaceEditorSelection("");
+                else if (g.rangeSelected) deleteRange(cur, g.selectionAnchor, cur.cursor);
                 else cur = Expression();
                 g.allSelected = false;
                 g.rangeSelected = false;

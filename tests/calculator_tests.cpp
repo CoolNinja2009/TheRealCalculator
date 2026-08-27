@@ -10,8 +10,12 @@ static Expression expressionFrom(const char* text) {
     for (const char* p = text; *p; ++p) {
         if (*p >= '0' && *p <= '9') insertDigit(expression, *p);
         else if (*p == 'x' || *p == 'y') insertVariable(expression, *p);
-        else if (*p == '+' || *p == '-' || *p == '*') insertOperator(expression, *p);
-        else if (*p == '=') insertEquals(expression);
+        else if (*p == '+' || *p == '-' || *p == '*') {
+            if (expression.cursor.row != expression.root.get()) moveRight(expression);
+            insertOperator(expression, *p);
+        }
+        else if (*p == '^') { insertPower(expression); }
+        else if (*p == '=') { if (expression.cursor.row != expression.root.get()) moveRight(expression); insertEquals(expression); }
         else if (*p == '!') insertOperator(expression, '!');
         else if (*p == '.') insertDigit(expression, *p);
     }
@@ -77,6 +81,14 @@ static void testQuadratics() {
     assert(!identity.valid);
     QuadraticResult contradiction = solveQuadratic(0.0, 0.0, 1.0);
     assert(!contradiction.valid);
+
+    Expression typed = expressionFrom("x^2+5x+6=0");
+    QuadraticResult typedResult;
+    std::string message;
+    assert(solveQuadraticEquation(typed.root.get(), typedResult, message));
+    assert(typedResult.rootCount == 2);
+    assertNear(typedResult.first, -2.0);
+    assertNear(typedResult.second, -3.0);
 }
 
 static void testInvalidLinearTerms() {
@@ -116,6 +128,18 @@ static void testAssignmentsPersist() {
     assert(workspace.commitCurrent(workspace.solvedValues()));
     assert(workspace.history().back()->result == "0");
     assert(workspace.history().size() == 3);
+
+    Workspace rootWorkspace;
+    rootWorkspace.current() = expressionFrom("x=4");
+    assert(rootWorkspace.commitCurrent());
+    Expression rootAssignment;
+    insertVariable(rootAssignment, 'y');
+    insertEquals(rootAssignment);
+    insertSqrt(rootAssignment);
+    insertVariable(rootAssignment, 'x');
+    rootWorkspace.current() = std::move(rootAssignment);
+    assert(rootWorkspace.commitCurrent(rootWorkspace.solvedValues()));
+    assert(rootWorkspace.history().back()->result == "y = 2");
 }
 
 static void testFactorials() {

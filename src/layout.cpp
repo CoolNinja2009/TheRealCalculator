@@ -156,6 +156,23 @@ Size measureOperator(HDC hdc, const Item* it, int depth) {
     return s;
 }
 
+HFONT createParenFont(int depth, int innerHeight) {
+    int height = std::max(fontPxForDepth(depth), innerHeight + scaledPx(6, depth));
+    return CreateFontW(-height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                       DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+int measureParenWidth(HDC hdc, int depth, int innerHeight) {
+    HFONT font = createParenFont(depth, innerHeight);
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    SIZE size{};
+    GetTextExtentPoint32W(hdc, L"(", 1, &size);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+    return size.cx;
+}
+
 Size measureEquals(HDC hdc, int depth) {
     HFONT f = fontForDepth(depth);
     HFONT old = (HFONT)SelectObject(hdc, f);
@@ -211,7 +228,7 @@ Size measureItemImpl(HDC hdc, const Item* it, int depth) {
         }
         case ItemType::Paren: {
             Size inner = measureRowImpl(hdc, it->a.get(), depth);
-            int glyphW = scaledPx(9, depth);
+            int glyphW = measureParenWidth(hdc, depth, inner.height());
             Size s;
             s.width = inner.width + 2 * glyphW;
             s.ascent = inner.ascent + scaledPx(2, depth);
@@ -338,31 +355,18 @@ void drawItemImpl(HDC hdc, const Item* it, int depth, int x, int baselineY,
         }
         case ItemType::Paren: {
             Size inner = measureRowImpl(hdc, it->a.get(), depth);
-            int glyphW = scaledPx(9, depth);
-            int top = baselineY - inner.ascent - scaledPx(2, depth);
-            int bot = baselineY + inner.descent + scaledPx(2, depth);
-            HPEN pen = CreatePen(PS_SOLID, std::max(1, scaledPx(2, depth) / 2), theme.text);
-            HPEN old = (HPEN)SelectObject(hdc, pen);
-            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            // Keep the curves inside the width reserved by measureItemImpl.
-            int midY = (top + bot) / 2;
-            POINT leftParen[] = {
-                { x + glyphW, top }, { x + glyphW / 2, top + (midY - top) / 2 },
-                { x, midY }, { x + glyphW / 2, midY + (bot - midY) / 2 },
-                { x + glyphW, bot }
-            };
-            int rx = x + inner.width + glyphW;
-            POINT rightParen[] = {
-                { rx, top }, { rx + glyphW / 2, top + (midY - top) / 2 },
-                { rx + glyphW, midY }, { rx + glyphW / 2, midY + (bot - midY) / 2 },
-                { rx, bot }
-            };
-            Polyline(hdc, leftParen, ARRAYSIZE(leftParen));
-            Polyline(hdc, rightParen, ARRAYSIZE(rightParen));
-            SelectObject(hdc, oldBrush);
-            SelectObject(hdc, old);
-            DeleteObject(pen);
+            int glyphW = measureParenWidth(hdc, depth, inner.height());
+            HFONT parenFont = createParenFont(depth, inner.height());
+            HFONT oldFont = (HFONT)SelectObject(hdc, parenFont);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, theme.text);
+            TEXTMETRICW metrics{};
+            GetTextMetricsW(hdc, &metrics);
+            TextOutW(hdc, x, baselineY - metrics.tmAscent, L"(", 1);
             drawRowImpl(hdc, it->a.get(), depth, x + glyphW, baselineY, theme, cursor, outCaret);
+            TextOutW(hdc, x + glyphW + inner.width, baselineY - metrics.tmAscent, L")", 1);
+            SelectObject(hdc, oldFont);
+            DeleteObject(parenFont);
             return;
         }
         case ItemType::Sqrt: {

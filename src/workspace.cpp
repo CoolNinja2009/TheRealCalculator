@@ -12,10 +12,30 @@ bool Workspace::commitCurrent(const EvaluationContext& context) {
     entry->expr = std::move(current_);
 
     if (hasEquals(entry->expr->root.get())) {
+        QuadraticResult quadratic;
         char variable = 0;
         double value = 0.0;
         std::string message;
-        if (solveSingleVariableEquation(entry->expr->root.get(), variable, value, message)) {
+        if (solveQuadraticEquation(entry->expr->root.get(), quadratic, message)) {
+            if (quadratic.rootCount == 0) entry->result = quadratic.message;
+            else if (quadratic.rootCount == 1) {
+                char result[96];
+                std::snprintf(result, sizeof(result), "x = %.10g", quadratic.first);
+                entry->result = result;
+            } else {
+                char result[128];
+                std::snprintf(result, sizeof(result), "x1 = %.10g, x2 = %.10g", quadratic.first, quadratic.second);
+                entry->result = result;
+            }
+            entry->isError = false;
+        } else if (solveVariableAssignment(entry->expr->root.get(), context, variable, value, message)) {
+            char result[96];
+            std::snprintf(result, sizeof(result), "%c = %.10g", variable, value);
+            entry->result = result;
+            entry->isError = false;
+            if (variable == 'x') solvedValues_.x = value;
+            else solvedValues_.y = value;
+        } else if (solveSingleVariableEquation(entry->expr->root.get(), variable, value, message)) {
             char result[96];
             std::snprintf(result, sizeof(result), "%c = %.10g (the other variable is free)", variable, value);
             entry->result = result;

@@ -98,11 +98,17 @@ copy it anywhere and run it.
 
 - Type `x+y=5`, press Enter, then type `x-y=6` and press Enter to solve the
   two-variable system. The second line displays both values.
+- Type a quadratic directly in the main window, such as `x^2+5x+6=0`, and
+  press Enter to display its roots. The coefficient dialog follows dark mode.
 - A single equation that reduces to one variable, such as `x+2y=x-3`,
   reports that variable and explains when the other remains free.
 - Press Up to recall the previous submitted expression, like a shell history.
 - Press `Ctrl+A` to highlight the current expression, `Ctrl+C` to copy it,
   `Ctrl+X` to copy and clear it, and `Ctrl+V` to paste calculator text.
+- Drag across a history output with the left mouse button, then press
+  `Ctrl+C` to copy just that output selection. `Ctrl+A` remains editor-only.
+- Drag across characters in the editor with the left mouse button, then press
+  `Ctrl+C` to copy only that character range.
 - Press Escape to remove the highlight before clearing the expression.
 - Press Delete twice quickly to reset saved `x` and `y` values while keeping
   the current expression and calculation history.

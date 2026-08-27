@@ -54,4 +54,10 @@ bool solveTwoVariableSystem(const Row* first, const Row* second,
 bool solveSingleVariableEquation(const Row* equation, char& variable,
 								 double& value, std::string& message);
 
+bool solveVariableAssignment(const Row* equation, const EvaluationContext& context,
+							 char& variable, double& value, std::string& message);
+
 bool isLinearEquation(const Row* equation);
+
+bool solveQuadraticEquation(const Row* equation, QuadraticResult& result,
+							std::string& message);

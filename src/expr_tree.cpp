@@ -186,6 +186,11 @@ void insertVariable(Expression& expr, char name) {
 }
 
 void insertOperator(Expression& expr, char op) {
+    if (op != '-' && isBRow(expr.cursor.row) && expr.cursor.row->owner &&
+        expr.cursor.row->owner->type == ItemType::Power &&
+        expr.cursor.index == (int)expr.cursor.row->items.size()) {
+        moveRight(expr);
+    }
     Row* row = expr.cursor.row;
     int idx = expr.cursor.index;
     auto item = std::make_unique<Item>(ItemType::Operator);
@@ -195,6 +200,11 @@ void insertOperator(Expression& expr, char op) {
 }
 
 void insertEquals(Expression& expr) {
+    if (isBRow(expr.cursor.row) && expr.cursor.row->owner &&
+        expr.cursor.row->owner->type == ItemType::Power &&
+        expr.cursor.index == (int)expr.cursor.row->items.size()) {
+        moveRight(expr);
+    }
     Row* row = expr.cursor.row;
     int idx = expr.cursor.index;
     auto item = std::make_unique<Item>(ItemType::Equals);
