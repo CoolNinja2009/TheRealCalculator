@@ -69,6 +69,9 @@ static void serializeItem(const Item* it, std::string& out) {
         case ItemType::Equals:
             out += " = ";
             break;
+        case ItemType::CloseParen:
+            out += ')';
+            break;
         case ItemType::Fraction:
             out += '(';
             serializeRow(it->a.get(), out);
@@ -306,10 +309,14 @@ void insertCloseParen(Expression& expr) {
         if (k >= 0) {
             expr.cursor.row = row->ownerParentRow;
             expr.cursor.index = k + 1;
+            return;
         }
     }
-    // Otherwise: parens are structural (inserted as a pair via '('), so a
-    // lone ')' keystroke with nothing open to close is simply ignored.
+    Row* parent = expr.cursor.row;
+    int index = expr.cursor.index;
+    auto item = std::make_unique<Item>(ItemType::CloseParen);
+    parent->items.insert(parent->items.begin() + index, std::move(item));
+    expr.cursor.index = index + 1;
 }
 
 // ---------------------------------------------------------------- motion
@@ -324,6 +331,7 @@ void moveLeft(Expression& expr) {
             case ItemType::Number:
             case ItemType::Variable:
             case ItemType::Equals:
+            case ItemType::CloseParen:
             case ItemType::Operator:
                 expr.cursor.index = idx - 1;
                 return;
@@ -360,6 +368,7 @@ void moveRight(Expression& expr) {
             case ItemType::Number:
             case ItemType::Variable:
             case ItemType::Equals:
+            case ItemType::CloseParen:
             case ItemType::Operator:
                 expr.cursor.index = idx + 1;
                 return;
@@ -460,7 +469,8 @@ void backspace(Expression& expr) {
         expr.cursor.index = idx - 1;
         return;
     }
-    if (target->type == ItemType::Operator) {
+    if (target->type == ItemType::Operator || target->type == ItemType::CloseParen ||
+        target->type == ItemType::Equals) {
         row->items.erase(row->items.begin() + (idx - 1));
         expr.cursor.index = idx - 1;
         return;
@@ -526,7 +536,8 @@ void doDelete(Expression& expr) {
         row->items.erase(row->items.begin() + idx);
         return;
     }
-    if (target->type == ItemType::Operator) {
+    if (target->type == ItemType::Operator || target->type == ItemType::CloseParen ||
+        target->type == ItemType::Equals) {
         row->items.erase(row->items.begin() + idx);
         return;
     }

@@ -120,6 +120,8 @@ struct RowParser {
                 throw std::runtime_error("Unexpected operator");
             case ItemType::Equals:
                 throw std::runtime_error("Equation needs two lines");
+            case ItemType::CloseParen:
+                throw std::runtime_error("Unmatched closing parenthesis");
         }
         throw std::runtime_error("Unknown item");
     }
@@ -285,6 +287,7 @@ struct PolynomialParser {
             }
             case ItemType::Operator:
             case ItemType::Equals:
+            case ItemType::CloseParen:
             case ItemType::Sqrt:
                 return { { 0, 0, 0 }, false };
         }
@@ -399,6 +402,7 @@ struct LinearParser {
             }
             case ItemType::Operator:
             case ItemType::Equals:
+            case ItemType::CloseParen:
                 return { 0, 0, 0, false };
         }
         return { 0, 0, 0, false };

@@ -110,6 +110,8 @@ copy it anywhere and run it.
 - Drag across characters in the editor with the left mouse button, then press
   `Ctrl+C` to copy only that character range.
 - Press Escape to remove the highlight before clearing the expression.
+- Press `Ctrl+Z` to undo the last edit. Home and End move to the start or end
+  of the current structural row.
 - Press Delete twice quickly to reset saved `x` and `y` values while keeping
   the current expression and calculation history.
 - Type `x` or `y` directly, or use the matching buttons in the top bar.

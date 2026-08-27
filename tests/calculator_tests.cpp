@@ -17,6 +17,8 @@ static Expression expressionFrom(const char* text) {
         else if (*p == '^') { insertPower(expression); }
         else if (*p == '=') { if (expression.cursor.row != expression.root.get()) moveRight(expression); insertEquals(expression); }
         else if (*p == '!') insertOperator(expression, '!');
+        else if (*p == '(') insertOpenParen(expression);
+        else if (*p == ')') insertCloseParen(expression);
         else if (*p == '.') insertDigit(expression, *p);
     }
     return expression;
@@ -178,6 +180,13 @@ static void testFactorials() {
     assertNear(evaluate(cancellation.root.get()), 0.0);
 }
 
+static void testStandaloneClosingParen() {
+    Expression expression = expressionFrom("5+4)");
+    assert(expression.toPlainString() == "5 + 4)");
+    backspace(expression);
+    assert(expression.toPlainString() == "5 + 4");
+}
+
 int main() {
     testVariableEvaluation();
     testSingleVariableEquation();
@@ -186,6 +195,7 @@ int main() {
     testInvalidLinearTerms();
     testAssignmentsPersist();
     testFactorials();
+    testStandaloneClosingParen();
     std::cout << "All calculator edge-case tests passed\n";
     return 0;
 }

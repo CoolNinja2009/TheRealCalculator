@@ -27,6 +27,7 @@ enum class ItemType {
     Variable,   // a named numeric variable (currently x or y)
     Operator,   // + - * ! (leaf glyph; division never appears here, see Fraction)
     Equals,     // equation separator
+    CloseParen, // standalone ')' delimiter
     Fraction,   // a/b  -> child rows: numerator (a), denominator (b)
     Paren,      // (a)  -> child row: inner (a).  b unused.
     Power,      // a^b  -> child rows: base (a), exponent (b)

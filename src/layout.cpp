@@ -201,6 +201,11 @@ Size measureItemImpl(HDC hdc, const Item* it, int depth) {
         case ItemType::Number:   return measureNumber(hdc, it, depth);
         case ItemType::Variable: return measureVariable(hdc, it, depth);
         case ItemType::Equals:   return measureEquals(hdc, depth);
+        case ItemType::CloseParen: {
+            Item display(ItemType::Number);
+            display.numText = ")";
+            return measureNumber(hdc, &display, depth);
+        }
         case ItemType::Operator: return measureOperator(hdc, it, depth);
         case ItemType::Fraction: {
             Size num = measureRowImpl(hdc, it->a.get(), depth + 1);
@@ -315,6 +320,9 @@ void drawItemImpl(HDC hdc, const Item* it, int depth, int x, int baselineY,
         }
         case ItemType::Equals:
             drawText(hdc, depth, x, baselineY, L" = ", theme.operatorColor);
+            return;
+        case ItemType::CloseParen:
+            drawText(hdc, depth, x, baselineY, L")", theme.text);
             return;
         case ItemType::Operator: {
             drawText(hdc, depth, x, baselineY, opGlyph(it->opChar), theme.operatorColor);

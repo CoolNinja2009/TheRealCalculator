@@ -66,12 +66,14 @@ struct App {
     bool editorSelecting = false;
     int editorAnchor = 0;
     int editorCaret = 0;
+    int editorTextCursor = -1;
     EvaluationContext values;
     std::vector<ButtonDef> buttons;
     RECT topBarRect{}, historyRect{}, editorRect{}, buttonAreaRect{};
     HFONT uiFont = nullptr;
     HFONT uiFontSmall = nullptr;
     HICON appIcon = nullptr;
+    std::vector<std::unique_ptr<Expression>> undo;
 } g;
 
 constexpr UINT_PTR kCaretTimerId = 1;
@@ -187,6 +189,8 @@ void ensureCaretVisible() {
 }
 
 void doAction(int action) {
+    if (action != ActToggleTheme && action != ActEquals)
+        g.undo.push_back(cloneExpression(g.workspace.current()));
     bool editsExpression = action != ActToggleTheme && action != ActEquals;
     if ((g.allSelected || g.rangeSelected) && editsExpression) {
         if (g.rangeSelected) deleteRange(g.workspace.current(), g.selectionAnchor,
@@ -242,6 +246,18 @@ void doAction(int action) {
     }
     ensureCaretVisible();
     InvalidateRect(g.hwnd, nullptr, FALSE);
+}
+
+void undoLastEdit() {
+    if (g.undo.empty()) return;
+    g.workspace.current() = std::move(*g.undo.back());
+    g.undo.pop_back();
+    g.allSelected = false;
+    g.rangeSelected = false;
+    g.editorTextCursor = -1;
+    g.editorAnchor = g.editorCaret = 0;
+    g.editorTextCursor = -1;
+    InvalidateRect(g.hwnd, &g.editorRect, FALSE);
 }
 
 void copyCurrentExpression() {
@@ -317,10 +333,41 @@ void replaceEditorSelection(const std::string& replacement) {
     plain.replace(begin, end - begin, replacement);
     expression = Expression();
     insertPlainText(expression, plain);
+    g.editorTextCursor = begin + (int)replacement.size();
     g.editorAnchor = 0;
     g.editorCaret = 0;
     g.allSelected = false;
     g.rangeSelected = false;
+}
+
+void rebuildEditorText(const std::string& text, int cursorPosition) {
+    Expression& expression = g.workspace.current();
+    expression = Expression();
+    insertPlainText(expression, text);
+    g.editorTextCursor = std::clamp(cursorPosition, 0, (int)text.size());
+    g.editorAnchor = g.editorCaret = 0;
+    g.allSelected = false;
+    g.rangeSelected = false;
+}
+
+int currentEditorTextCursor() {
+    if (g.editorTextCursor >= 0) return g.editorTextCursor;
+    if (g.editorCaret != g.editorAnchor) return g.editorCaret;
+    return (int)g.workspace.current().toPlainString().size();
+}
+
+int editorTextX(HDC hdc, const std::string& text, int index) {
+    HFONT font = CreateFontW(-fontHeightForDepth(0), 0, 0, 0, FW_NORMAL,
+                             FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    HFONT old = (HFONT)SelectObject(hdc, font);
+    std::wstring prefix(text.begin(), text.begin() + std::clamp(index, 0, (int)text.size()));
+    SIZE size{};
+    GetTextExtentPoint32W(hdc, prefix.c_str(), (int)prefix.size(), &size);
+    SelectObject(hdc, old);
+    DeleteObject(font);
+    return g.editorRect.left + 16 + size.cx;
 }
 
 std::wstring outputText(int entryIndex) {
@@ -777,6 +824,13 @@ void paint(HDC hdc, RECT client) {
         CaretInfo caret;
         drawExpression(mem, cur.root.get(), g.editorRect.left + 16, baseline, theme, &cur.cursor, &caret);
 
+        if (g.editorTextCursor >= 0) {
+            caret.valid = true;
+            caret.x = editorTextX(mem, cur.toPlainString(), g.editorTextCursor);
+            caret.top = baseline - s.ascent;
+            caret.bottom = baseline + s.descent;
+        }
+
         if (caret.valid && g.caretVisible) {
             HPEN cp = CreatePen(PS_SOLID, 2, theme.caret);
             HPEN ocp = (HPEN)SelectObject(mem, cp);
@@ -880,6 +934,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 g.editorSelecting = true;
                 g.editorAnchor = editorCharacterAtPoint(pt);
                 g.editorCaret = g.editorAnchor;
+                g.editorTextCursor = g.editorAnchor;
                 g.allSelected = false;
                 g.rangeSelected = false;
                 g.outputEntry = -1;
@@ -955,6 +1010,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_CHAR: {
             wchar_t c = (wchar_t)wParam;
+            if (g.editorTextCursor >= 0 && !g.allSelected && !g.rangeSelected) {
+                std::string text = g.workspace.current().toPlainString();
+                int position = currentEditorTextCursor();
+                if (c == 8) {
+                    if (position > 0) text.erase(position - 1, 1), --position;
+                } else if (c == 13) {
+                    g.editorTextCursor = -1;
+                    doAction(ActEquals);
+                    return 0;
+                } else if ((c >= L'0' && c <= L'9') || c == L'.' || c == L'+' || c == L'-' ||
+                           c == L'*' || c == L'/' || c == L'(' || c == L')' || c == L'^' ||
+                           c == L'!' || c == L'=' || c == L'x' || c == L'X' || c == L'y' || c == L'Y') {
+                    text.insert(text.begin() + position, (char)std::tolower((char)c));
+                    ++position;
+                } else return 0;
+                g.undo.push_back(cloneExpression(g.workspace.current()));
+                rebuildEditorText(text, position);
+                ensureCaretVisible();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (c == L'!' || c == L'=')
+                g.undo.push_back(cloneExpression(g.workspace.current()));
             if (g.editorCaret != g.editorAnchor) {
                 if (c == 8) replaceEditorSelection("");
                 else if ((c >= L'0' && c <= L'9') || c == L'.' || c == L'+' || c == L'-' ||
@@ -991,9 +1069,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_KEYDOWN: {
             Expression& cur = g.workspace.current();
             bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (control && wParam == 'Z') { undoLastEdit(); return 0; }
             if (control && wParam == 'A') {
                 g.editorAnchor = 0;
                 g.editorCaret = 0;
+                g.editorTextCursor = -1;
                 g.outputEntry = -1;
                 g.outputAnchor = 0;
                 g.outputCaret = 0;
@@ -1022,14 +1102,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_LEFT:
                 case VK_RIGHT: {
                     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                    if (shift && cur.cursor.row == cur.root.get()) {
-                        if (!g.rangeSelected) g.selectionAnchor = cur.cursor;
-                        if (wParam == VK_LEFT) moveLeft(cur); else moveRight(cur);
-                        g.rangeSelected = g.selectionAnchor.row == cur.cursor.row &&
-                                          g.selectionAnchor.index != cur.cursor.index;
+                    int position = currentEditorTextCursor();
+                    if (shift) {
+                        if (!g.editorCaret && !g.editorAnchor) g.editorAnchor = position;
+                        position += wParam == VK_LEFT ? -1 : 1;
+                        g.editorCaret = std::clamp(position, 0, (int)cur.toPlainString().size());
+                        g.editorTextCursor = -1;
+                        g.rangeSelected = false;
                         g.allSelected = false;
                     } else {
-                        if (wParam == VK_LEFT) moveLeft(cur); else moveRight(cur);
+                        g.editorTextCursor = std::clamp(position + (wParam == VK_LEFT ? -1 : 1),
+                                                        0, (int)cur.toPlainString().size());
+                        g.editorAnchor = g.editorCaret = 0;
                         g.rangeSelected = false;
                         g.allSelected = false;
                     }
@@ -1039,6 +1123,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 case VK_UP:
                     if (!g.workspace.recallPrevious()) moveUp(cur);
+                    ensureCaretVisible();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                case VK_HOME:
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        int position = currentEditorTextCursor();
+                        if (g.editorCaret == g.editorAnchor) g.editorAnchor = position;
+                        g.editorCaret = 0;
+                        g.editorTextCursor = -1;
+                    } else {
+                        g.editorTextCursor = 0;
+                        g.editorAnchor = g.editorCaret = 0;
+                    }
+                    ensureCaretVisible();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                case VK_END:
+                    if (GetKeyState(VK_SHIFT) & 0x8000) {
+                        int position = currentEditorTextCursor();
+                        if (g.editorCaret == g.editorAnchor) g.editorAnchor = position;
+                        g.editorCaret = (int)cur.toPlainString().size();
+                        g.editorTextCursor = -1;
+                    } else {
+                        g.editorTextCursor = (int)cur.toPlainString().size();
+                        g.editorAnchor = g.editorCaret = 0;
+                    }
                     ensureCaretVisible();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
