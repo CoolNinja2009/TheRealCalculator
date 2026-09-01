@@ -32,6 +32,15 @@ struct Theme {
     COLORREF divider;
     COLORREF accent;
     bool isDark;
+
+    // LCD-style screen colors (history + editor), styled after a classic
+    // dot-matrix calculator display rather than a generic white panel.
+    COLORREF screenBackground;
+    COLORREF screenText;
+    COLORREF screenOperator;
+    COLORREF screenResult;
+    COLORREF screenCaret;
+    COLORREF screenPlaceholder;
 };
 
 Theme lightTheme();

@@ -254,6 +254,11 @@ void insertFraction(Expression& expr) {
 }
 
 void insertPower(Expression& expr) {
+    if (isBRow(expr.cursor.row) && expr.cursor.row->owner &&
+        expr.cursor.row->owner->type == ItemType::Power &&
+        expr.cursor.index == (int)expr.cursor.row->items.size()) {
+        moveRight(expr);
+    }
     Row* row = expr.cursor.row;
     int insertPos = expr.cursor.index;
 
@@ -301,22 +306,25 @@ void insertOpenParen(Expression& expr) {
 }
 
 void insertCloseParen(Expression& expr) {
+    // ')' is structural, not a typed glyph (see header comment): if the
+    // cursor sits anywhere inside an unclosed Paren's inner row, step out
+    // to just after that Paren -- regardless of whether the cursor is at
+    // the row's end, since any content still to the right stays exactly
+    // where it is (inside the paren) either way. This matches how natural
+    // display calculators (Casio fx-991ES) resolve ')'.
+    //
+    // If the cursor is NOT inside an open paren, do nothing. Inserting a
+    // bare ')' character here would draw as a small flat glyph instead of
+    // the tall stretched bracket a real Paren renders, which is exactly
+    // the "mismatched bracket" look this avoids.
     Row* row = expr.cursor.row;
-    if (row->owner && row->owner->type == ItemType::Paren &&
-        row->owner->a.get() == row &&
-        expr.cursor.index == (int)row->items.size()) {
+    if (row->owner && row->owner->type == ItemType::Paren && row->owner->a.get() == row) {
         int k = ownerIndexInParentRow(row);
         if (k >= 0) {
             expr.cursor.row = row->ownerParentRow;
             expr.cursor.index = k + 1;
-            return;
         }
     }
-    Row* parent = expr.cursor.row;
-    int index = expr.cursor.index;
-    auto item = std::make_unique<Item>(ItemType::CloseParen);
-    parent->items.insert(parent->items.begin() + index, std::move(item));
-    expr.cursor.index = index + 1;
 }
 
 // ---------------------------------------------------------------- motion
@@ -431,6 +439,16 @@ void backspace(Expression& expr) {
         if (!row->owner) return; // start of whole expression
 
         if (isBRow(row)) {
+            if (rowIsEmpty(row)) {
+                int ownerIndex = ownerIndexInParentRow(row);
+                if (ownerIndex >= 0) {
+                    Row* parent = row->ownerParentRow;
+                    parent->items.erase(parent->items.begin() + ownerIndex);
+                    expr.cursor.row = parent;
+                    expr.cursor.index = ownerIndex;
+                }
+                return;
+            }
             // Backspace at the very start of a denominator/exponent steps
             // back into the end of the numerator/base, matching natural
             // calculators (no data is lost).
@@ -502,6 +520,17 @@ void doDelete(Expression& expr) {
 
     if (idx == (int)row->items.size()) {
         if (!row->owner) return; // end of whole expression
+
+        if (isBRow(row) && rowIsEmpty(row)) {
+            int ownerIndex = ownerIndexInParentRow(row);
+            if (ownerIndex >= 0) {
+                Row* parent = row->ownerParentRow;
+                parent->items.erase(parent->items.begin() + ownerIndex);
+                expr.cursor.row = parent;
+                expr.cursor.index = ownerIndex;
+            }
+            return;
+        }
 
         if (isARow(row) && row->owner &&
             (row->owner->type == ItemType::Fraction || row->owner->type == ItemType::Power)) {

@@ -35,8 +35,10 @@ struct ButtonDef {
     RECT rect{};
     std::wstring label;
     int action = 0; // Action enum below
-    bool isOperator = false;
-    bool isAccent = false;
+    bool isOperator = false;  // right-hand arithmetic column (+ - x /)
+    bool isAccent = false;    // the big "=" key
+    bool isFunction = false;  // ( ) x^y sqrt DEL -- dark "function" keycaps
+    bool isDanger = false;    // AC
 };
 
 enum Action {
@@ -112,13 +114,14 @@ void saveDarkMode(bool dark) {
 void layoutButtons(int areaLeft, int areaTop, int areaW, int areaH) {
     g.buttons.clear();
     const int cols = 4;
-    const int rows = 6; // last row is the wide "=" button spanning all cols
+    const int rows = 7; // last row is the wide "=" button spanning all cols
     int gap = 6;
     int cellW = (areaW - gap * (cols + 1)) / cols;
     int cellH = (areaH - gap * (rows + 1)) / rows;
 
     auto place = [&](int col, int row, int colSpan, const wchar_t* label, Action act,
-                      bool isOp = false, bool accent = false) {
+                      bool isOp = false, bool accent = false, bool isFunc = false,
+                      bool danger = false) {
         ButtonDef b;
         b.rect.left = areaLeft + gap + col * (cellW + gap);
         b.rect.top = areaTop + gap + row * (cellH + gap);
@@ -128,35 +131,42 @@ void layoutButtons(int areaLeft, int areaTop, int areaW, int areaH) {
         b.action = act;
         b.isOperator = isOp;
         b.isAccent = accent;
+        b.isFunction = isFunc;
+        b.isDanger = danger;
         g.buttons.push_back(b);
     };
 
-    place(0, 0, 1, L"(", ActOpenParen);
-    place(1, 0, 1, L")", ActCloseParen);
-    place(2, 0, 1, L"x^y", ActPower);
-    place(3, 0, 1, L"\u221A", ActSqrt);
+    // Row 0: quick-access clear row, like the AC/DEL pair on a real
+    // scientific calculator, sitting above the main keypad.
+    place(0, 0, 2, L"AC", ActClearAll, false, false, false, true);
+    place(2, 0, 2, L"DEL", ActBackspace, false, false, true);
 
-    place(0, 1, 1, L"7", ActDigit7);
-    place(1, 1, 1, L"8", ActDigit8);
-    place(2, 1, 1, L"9", ActDigit9);
-    place(3, 1, 1, L"\u00F7", ActFrac, true);
+    place(0, 1, 1, L"(", ActOpenParen, false, false, true);
+    place(1, 1, 1, L")", ActCloseParen, false, false, true);
+    place(2, 1, 1, L"x^y", ActPower, false, false, true);
+    place(3, 1, 1, L"\u221A", ActSqrt, false, false, true);
 
-    place(0, 2, 1, L"4", ActDigit4);
-    place(1, 2, 1, L"5", ActDigit5);
-    place(2, 2, 1, L"6", ActDigit6);
-    place(3, 2, 1, L"\u00D7", ActMul, true);
+    place(0, 2, 1, L"7", ActDigit7);
+    place(1, 2, 1, L"8", ActDigit8);
+    place(2, 2, 1, L"9", ActDigit9);
+    place(3, 2, 1, L"\u00F7", ActFrac, true);
 
-    place(0, 3, 1, L"1", ActDigit1);
-    place(1, 3, 1, L"2", ActDigit2);
-    place(2, 3, 1, L"3", ActDigit3);
-    place(3, 3, 1, L"\u2212", ActMinus, true);
+    place(0, 3, 1, L"4", ActDigit4);
+    place(1, 3, 1, L"5", ActDigit5);
+    place(2, 3, 1, L"6", ActDigit6);
+    place(3, 3, 1, L"\u00D7", ActMul, true);
 
-    place(0, 4, 1, L"C", ActClear);
-    place(1, 4, 1, L"0", ActDigit0);
-    place(2, 4, 1, L".", ActDot);
-    place(3, 4, 1, L"+", ActPlus, true);
+    place(0, 4, 1, L"1", ActDigit1);
+    place(1, 4, 1, L"2", ActDigit2);
+    place(2, 4, 1, L"3", ActDigit3);
+    place(3, 4, 1, L"\u2212", ActMinus, true);
 
-    place(0, 5, 4, L"=", ActEquals, false, true);
+    place(0, 5, 1, L"C", ActClear, false, false, true);
+    place(1, 5, 1, L"0", ActDigit0);
+    place(2, 5, 1, L".", ActDot);
+    place(3, 5, 1, L"+", ActPlus, true);
+
+    place(0, 6, 4, L"=", ActEquals, false, true);
 }
 
 void recomputeLayout() {
@@ -167,7 +177,7 @@ void recomputeLayout() {
 
     int topBarH = 40;
     int editorH = std::max(70, h / 6);
-    int buttonAreaH = std::min(360, std::max(260, h * 5 / 12));
+    int buttonAreaH = std::min(420, std::max(300, h * 1 / 2));
 
     g.topBarRect = { 0, 0, w, topBarH };
     g.buttonAreaRect = { 0, h - buttonAreaH, w, h };
@@ -624,21 +634,54 @@ RECT themeToggleRect() {
     return topActionRect(g.topBarRect.right - 8, 52);
 }
 
-void paintButton(HDC hdc, const ButtonDef& b, const Theme& theme) {
-    COLORREF fill = theme.panelBackground;
-    COLORREF fg = theme.text;
-    if (b.isAccent) { fill = theme.accent; fg = RGB(255, 255, 255); }
-    else if (b.isOperator) { fg = theme.operatorColor; }
+// Lighten/darken a color by a signed delta per channel (clamped), used to
+// fake a raised-keycap bevel without needing alpha blending.
+COLORREF shade(COLORREF c, int delta) {
+    auto ch = [&](int v) { return (BYTE)std::clamp(v + delta, 0, 255); };
+    return RGB(ch(GetRValue(c)), ch(GetGValue(c)), ch(GetBValue(c)));
+}
 
+void paintButton(HDC hdc, const ButtonDef& b, const Theme& theme) {
+    // Casio-style keycap palette: cream digit keys, dark slate function
+    // keys, an orange operator column + "=" key, and a red AC key -- the
+    // classic desk-calculator color coding instead of one flat button style.
+    COLORREF fill;
+    COLORREF fg;
+    if (b.isDanger) { fill = theme.isDark ? RGB(0xB0, 0x36, 0x27) : RGB(0xC7, 0x3E, 0x2A); fg = RGB(255, 255, 255); }
+    else if (b.isAccent) { fill = theme.accent; fg = RGB(255, 255, 255); }
+    else if (b.isOperator) { fill = theme.accent; fg = RGB(255, 255, 255); }
+    else if (b.isFunction) { fill = theme.isDark ? RGB(0x3A, 0x3D, 0x45) : RGB(0x50, 0x54, 0x5C); fg = RGB(0xF2, 0xF2, 0xF2); }
+    else { fill = theme.isDark ? RGB(0x4E, 0x51, 0x58) : RGB(0xF9, 0xF7, 0xF2); fg = theme.isDark ? RGB(0xF2, 0xF2, 0xF2) : RGB(0x24, 0x24, 0x24); }
+
+    int radius = 6;
+
+    // Drop shadow: a slightly-inset darker copy offset down-right so the
+    // key reads as sitting proud of the calculator body.
+    HBRUSH shadowBrush = CreateSolidBrush(shade(theme.background, theme.isDark ? -18 : -35));
+    HBRUSH oldShadowBrush = (HBRUSH)SelectObject(hdc, shadowBrush);
+    HPEN nullPen = (HPEN)GetStockObject(NULL_PEN);
+    HPEN oldPen0 = (HPEN)SelectObject(hdc, nullPen);
+    RoundRect(hdc, b.rect.left + 1, b.rect.top + 2, b.rect.right + 1, b.rect.bottom + 2, radius, radius);
+    SelectObject(hdc, oldShadowBrush);
+    SelectObject(hdc, oldPen0);
+    DeleteObject(shadowBrush);
+
+    // The keycap itself.
     HBRUSH brush = CreateSolidBrush(fill);
     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, brush);
-    HPEN pen = CreatePen(PS_SOLID, 1, theme.divider);
+    HPEN pen = CreatePen(PS_SOLID, 1, shade(fill, theme.isDark ? -35 : -45));
     HPEN oldPen = (HPEN)SelectObject(hdc, pen);
-    RoundRect(hdc, b.rect.left, b.rect.top, b.rect.right, b.rect.bottom, 10, 10);
-    SelectObject(hdc, oldBrush);
+    RoundRect(hdc, b.rect.left, b.rect.top, b.rect.right, b.rect.bottom, radius, radius);
     SelectObject(hdc, oldPen);
-    DeleteObject(brush);
     DeleteObject(pen);
+
+    // Bevel highlight along the top edge for a subtle raised look.
+    HPEN hi = CreatePen(PS_SOLID, 1, shade(fill, theme.isDark ? 25 : 40));
+    SelectObject(hdc, hi);
+    MoveToEx(hdc, b.rect.left + radius, b.rect.top + 2, nullptr);
+    LineTo(hdc, b.rect.right - radius, b.rect.top + 2);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(hi);
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, fg);
@@ -650,6 +693,19 @@ void paintButton(HDC hdc, const ButtonDef& b, const Theme& theme) {
 
 void paint(HDC hdc, RECT client) {
     Theme theme = g.dark ? darkTheme() : lightTheme();
+
+    // A copy of the theme tuned for the LCD-style screen area (history +
+    // editor): its own background/text/operator/result/caret colors, so the
+    // whole screen reads as one continuous dot-matrix display rather than a
+    // plain white panel that happens to sit above the keypad.
+    Theme screenTheme = theme;
+    screenTheme.background = theme.screenBackground;
+    screenTheme.panelBackground = theme.screenBackground;
+    screenTheme.text = theme.screenText;
+    screenTheme.operatorColor = theme.screenOperator;
+    screenTheme.resultColor = theme.screenResult;
+    screenTheme.caret = theme.screenCaret;
+    screenTheme.placeholder = theme.screenPlaceholder;
 
     HDC mem = CreateCompatibleDC(hdc);
     HBITMAP bmp = CreateCompatibleBitmap(hdc, client.right, client.bottom);
@@ -665,48 +721,38 @@ void paint(HDC hdc, RECT client) {
     DeleteObject(panelBrush);
     {
         SetBkMode(mem, TRANSPARENT);
-        SetTextColor(mem, theme.text);
+        SetTextColor(mem, theme.isDark ? RGB(0xF0, 0xF0, 0xF0) : RGB(0x2A, 0x2A, 0x2A));
         HFONT old = (HFONT)SelectObject(mem, g.uiFont);
         RECT r = g.topBarRect; r.left += 12;
         DrawTextW(mem, L"Natural Calculator", -1, &r, DT_VCENTER | DT_SINGLELINE);
         SelectObject(mem, old);
     }
+    // Small slate pill buttons -- same family as the dark function keycaps
+    // below, so the whole chrome reads as one coherent design instead of
+    // a row of near-invisible white-on-white outlined boxes.
+    auto drawPill = [&](RECT rect, const wchar_t* label) {
+        COLORREF fill = theme.isDark ? RGB(0x3A, 0x3D, 0x45) : RGB(0x50, 0x54, 0x5C);
+        HBRUSH b = CreateSolidBrush(fill);
+        HBRUSH ob = (HBRUSH)SelectObject(mem, b);
+        HPEN nullPen = (HPEN)GetStockObject(NULL_PEN);
+        HPEN op = (HPEN)SelectObject(mem, nullPen);
+        RoundRect(mem, rect.left, rect.top, rect.right, rect.bottom, 8, 8);
+        SelectObject(mem, ob); SelectObject(mem, op);
+        DeleteObject(b);
+        SetTextColor(mem, RGB(0xF2, 0xF2, 0xF2));
+        HFONT old = (HFONT)SelectObject(mem, g.uiFontSmall);
+        DrawTextW(mem, label, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(mem, old);
+    };
     {
         RECT xr = topActionRect(g.topBarRect.right - 68, 28);
         RECT yr = topActionRect(g.topBarRect.right - 100, 28);
         RECT qr = topActionRect(g.topBarRect.right - 132, 76);
-        const std::pair<RECT, const wchar_t*> actions[] = {
-            { xr, L"x" }, { yr, L"y" }, { qr, L"Quadratic" }
-        };
-        for (const auto& action : actions) {
-            RECT actionRect = action.first;
-            HBRUSH b = CreateSolidBrush(theme.panelBackground);
-            HPEN p = CreatePen(PS_SOLID, 1, theme.divider);
-            HBRUSH ob = (HBRUSH)SelectObject(mem, b);
-            HPEN op = (HPEN)SelectObject(mem, p);
-            RoundRect(mem, actionRect.left, actionRect.top, actionRect.right, actionRect.bottom, 8, 8);
-            SelectObject(mem, ob); SelectObject(mem, op);
-            DeleteObject(b); DeleteObject(p);
-            SetTextColor(mem, theme.text);
-            HFONT old = (HFONT)SelectObject(mem, g.uiFontSmall);
-            DrawTextW(mem, action.second, -1, &actionRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(mem, old);
-        }
+        drawPill(xr, L"x");
+        drawPill(yr, L"y");
+        drawPill(qr, L"Quadratic");
     }
-    {
-        RECT tr = themeToggleRect();
-        HBRUSH b = CreateSolidBrush(theme.panelBackground);
-        HPEN p = CreatePen(PS_SOLID, 1, theme.divider);
-        HBRUSH ob = (HBRUSH)SelectObject(mem, b);
-        HPEN op = (HPEN)SelectObject(mem, p);
-        RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 8, 8);
-        SelectObject(mem, ob); SelectObject(mem, op);
-        DeleteObject(b); DeleteObject(p);
-        SetTextColor(mem, theme.text);
-        HFONT old = (HFONT)SelectObject(mem, g.uiFontSmall);
-        DrawTextW(mem, g.dark ? L"Light" : L"Dark", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(mem, old);
-    }
+    drawPill(themeToggleRect(), g.dark ? L"Light" : L"Dark");
     HPEN divPen = CreatePen(PS_SOLID, 1, theme.divider);
     HPEN oldPen = (HPEN)SelectObject(mem, divPen);
     MoveToEx(mem, 0, g.topBarRect.bottom, nullptr);
@@ -716,6 +762,10 @@ void paint(HDC hdc, RECT client) {
 
     // --- history (scrollable) ---
     {
+        HBRUSH screenBrush = CreateSolidBrush(theme.screenBackground);
+        FillRect(mem, &g.historyRect, screenBrush);
+        DeleteObject(screenBrush);
+
         HRGN clip = CreateRectRgnIndirect(&g.historyRect);
         SelectClipRgn(mem, clip);
 
@@ -741,10 +791,10 @@ void paint(HDC hdc, RECT client) {
             int baseline = y + s.ascent;
             if (baseline + s.descent >= g.historyRect.top && baseline - s.ascent <= g.historyRect.bottom) {
                 drawExpression(mem, hist[i]->expr->root.get(), g.historyRect.left + pad, baseline,
-                                theme, nullptr, nullptr);
+                                screenTheme, nullptr, nullptr);
 
                 HFONT old = (HFONT)SelectObject(mem, g.uiFontSmall);
-                SetTextColor(mem, hist[i]->isError ? RGB(0xD8, 0x3B, 0x3B) : theme.resultColor);
+                SetTextColor(mem, hist[i]->isError ? RGB(0xD8, 0x3B, 0x3B) : screenTheme.resultColor);
                 SetBkMode(mem, TRANSPARENT);
                 std::wstring res = L"= " + std::wstring(hist[i]->result.begin(), hist[i]->result.end());
                 RECT rr = { g.historyRect.left + pad, y + s.height() + 2,
@@ -775,10 +825,10 @@ void paint(HDC hdc, RECT client) {
 
     // --- editor (current expression) ---
     {
-        HBRUSH b = CreateSolidBrush(theme.panelBackground);
+        HBRUSH b = CreateSolidBrush(theme.screenBackground);
         FillRect(mem, &g.editorRect, b);
         DeleteObject(b);
-        HPEN p = CreatePen(PS_SOLID, 1, theme.divider);
+        HPEN p = CreatePen(PS_SOLID, 1, shade(theme.screenBackground, theme.isDark ? 20 : -30));
         HPEN op = (HPEN)SelectObject(mem, p);
         MoveToEx(mem, 0, g.editorRect.top, nullptr);
         LineTo(mem, client.right, g.editorRect.top);
@@ -822,7 +872,7 @@ void paint(HDC hdc, RECT client) {
             DeleteObject(selectionBrush);
         }
         CaretInfo caret;
-        drawExpression(mem, cur.root.get(), g.editorRect.left + 16, baseline, theme, &cur.cursor, &caret);
+        drawExpression(mem, cur.root.get(), g.editorRect.left + 16, baseline, screenTheme, &cur.cursor, &caret);
 
         if (g.editorTextCursor >= 0) {
             caret.valid = true;
@@ -832,7 +882,7 @@ void paint(HDC hdc, RECT client) {
         }
 
         if (caret.valid && g.caretVisible) {
-            HPEN cp = CreatePen(PS_SOLID, 2, theme.caret);
+            HPEN cp = CreatePen(PS_SOLID, 2, screenTheme.caret);
             HPEN ocp = (HPEN)SelectObject(mem, cp);
             MoveToEx(mem, caret.x, caret.top, nullptr);
             LineTo(mem, caret.x, caret.bottom);
@@ -1102,8 +1152,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_LEFT:
                 case VK_RIGHT: {
                     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                    int position = currentEditorTextCursor();
                     if (shift) {
+                        int position = currentEditorTextCursor();
                         if (!g.editorCaret && !g.editorAnchor) g.editorAnchor = position;
                         position += wParam == VK_LEFT ? -1 : 1;
                         g.editorCaret = std::clamp(position, 0, (int)cur.toPlainString().size());
@@ -1111,8 +1161,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         g.rangeSelected = false;
                         g.allSelected = false;
                     } else {
-                        g.editorTextCursor = std::clamp(position + (wParam == VK_LEFT ? -1 : 1),
-                                                        0, (int)cur.toPlainString().size());
+                        // Move the real structural cursor (the same one used
+                        // by button/mouse editing) instead of a parallel
+                        // flat-text cursor. The flat-text cursor used to
+                        // reparse the whole expression from a plain string on
+                        // every subsequent keystroke, which could not
+                        // faithfully round-trip parens/powers typed mid-
+                        // expression and produced mismatched-looking output.
+                        if (wParam == VK_LEFT) moveLeft(cur); else moveRight(cur);
+                        g.editorTextCursor = -1;
                         g.editorAnchor = g.editorCaret = 0;
                         g.rangeSelected = false;
                         g.allSelected = false;

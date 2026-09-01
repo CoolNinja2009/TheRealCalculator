@@ -187,6 +187,17 @@ static void testStandaloneClosingParen() {
     assert(expression.toPlainString() == "5 + 4");
 }
 
+static void testPowerEditing() {
+    Expression expression;
+    insertDigit(expression, '2');
+    insertPower(expression);
+    insertDigit(expression, '2');
+    insertPower(expression);
+    std::cerr << "Power: [" << expression.toPlainString() << "]\n";
+    backspace(expression);
+    assert(expression.toPlainString() == "(2)^(2)");
+}
+
 int main() {
     testVariableEvaluation();
     testSingleVariableEquation();
@@ -196,6 +207,7 @@ int main() {
     testAssignmentsPersist();
     testFactorials();
     testStandaloneClosingParen();
+    testPowerEditing();
     std::cout << "All calculator edge-case tests passed\n";
     return 0;
 }

@@ -6,22 +6,32 @@
 
 Theme lightTheme() {
     Theme t;
-    t.background      = RGB(0xFA, 0xFA, 0xFA);
-    t.panelBackground = RGB(0xFF, 0xFF, 0xFF);
+    // Warm taupe "calculator body" instead of near-white, so the cream
+    // keycaps actually read as physical buttons against it.
+    t.background      = RGB(0xD6, 0xD2, 0xC8);
+    t.panelBackground = RGB(0xEA, 0xE7, 0xDF);
     t.text             = RGB(0x1B, 0x1B, 0x1B);
     t.operatorColor    = RGB(0x00, 0x5A, 0x9E);
     t.resultColor      = RGB(0x00, 0x78, 0xD4);
     t.caret             = RGB(0x00, 0x5A, 0x9E);
     t.placeholder       = RGB(0xC6, 0xC6, 0xC6);
-    t.divider           = RGB(0xE1, 0xE1, 0xE1);
-    t.accent            = RGB(0x00, 0x78, 0xD4);
+    t.divider           = RGB(0xBB, 0xB6, 0xAA);
+    t.accent            = RGB(0xE0, 0x7A, 0x1E);
     t.isDark = false;
+
+    // Classic dot-matrix LCD panel: sage-green background, near-black text.
+    t.screenBackground  = RGB(0xC6, 0xD3, 0xB8);
+    t.screenText        = RGB(0x23, 0x28, 0x1C);
+    t.screenOperator    = RGB(0x1E, 0x3E, 0x27);
+    t.screenResult      = RGB(0x0C, 0x5B, 0x2E);
+    t.screenCaret        = RGB(0x23, 0x28, 0x1C);
+    t.screenPlaceholder  = RGB(0x8E, 0x99, 0x80);
     return t;
 }
 
 Theme darkTheme() {
     Theme t;
-    t.background      = RGB(0x20, 0x20, 0x20);
+    t.background      = RGB(0x1A, 0x1A, 0x1C);
     t.panelBackground = RGB(0x2B, 0x2B, 0x2B);
     t.text             = RGB(0xF0, 0xF0, 0xF0);
     t.operatorColor    = RGB(0x6C, 0xC2, 0xFF);
@@ -29,8 +39,16 @@ Theme darkTheme() {
     t.caret             = RGB(0x6C, 0xC2, 0xFF);
     t.placeholder       = RGB(0x5A, 0x5A, 0x5A);
     t.divider           = RGB(0x3A, 0x3A, 0x3A);
-    t.accent            = RGB(0x60, 0xCD, 0xFF);
+    t.accent            = RGB(0xE0, 0x8A, 0x2E);
     t.isDark = true;
+
+    // Dark mint-on-black LCD, reminiscent of an old backlit display.
+    t.screenBackground  = RGB(0x10, 0x17, 0x12);
+    t.screenText        = RGB(0xD6, 0xEE, 0xDA);
+    t.screenOperator    = RGB(0x86, 0xE0, 0xA6);
+    t.screenResult      = RGB(0x8F, 0xE3, 0xB0);
+    t.screenCaret        = RGB(0xD6, 0xEE, 0xDA);
+    t.screenPlaceholder  = RGB(0x4A, 0x5A, 0x4C);
     return t;
 }
 
