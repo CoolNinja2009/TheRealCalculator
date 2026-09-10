@@ -41,6 +41,37 @@ static bool isBRow(Row* child) {
     return child && child->owner && child->owner->b.get() == child;
 }
 
+// Remove the structural item at `parent->items[ownerIndex]` and splice
+// `sourceRow`'s items directly into `parent` in its place, instead of
+// discarding them. Used whenever a structural wrapper (Fraction, Power,
+// Paren, Sqrt) collapses because one side is empty -- e.g. backspacing an
+// empty exponent on "2^" should collapse back to plain "2", not delete
+// the base along with the wrapper.
+//
+// Sets expr.cursor to land in `parent`, either right after the spliced
+// content (cursorAfterSpliced == true, the natural backspace resting
+// point) or right before it (cursorAfterSpliced == false, the natural
+// forward-delete resting point).
+static void collapseStructuralItem(Expression& expr, Row* parent, int ownerIndex,
+                                    Row* sourceRow, bool cursorAfterSpliced) {
+    std::vector<std::unique_ptr<Item>> spliced;
+    if (sourceRow) {
+        for (auto& it : sourceRow->items) spliced.push_back(std::move(it));
+    }
+    parent->items.erase(parent->items.begin() + ownerIndex);
+    int count = (int)spliced.size();
+    for (int i = 0; i < count; ++i) {
+        Item* itemPtr = spliced[i].get();
+        // Reparent: these items now live directly in `parent`, so any
+        // structural children they own must point back to `parent`.
+        if (itemPtr->a) itemPtr->a->ownerParentRow = parent;
+        if (itemPtr->b) itemPtr->b->ownerParentRow = parent;
+        parent->items.insert(parent->items.begin() + ownerIndex + i, std::move(spliced[i]));
+    }
+    expr.cursor.row = parent;
+    expr.cursor.index = cursorAfterSpliced ? (ownerIndex + count) : ownerIndex;
+}
+
 // ------------------------------------------------------------- Expression
 
 Expression::Expression() {
@@ -438,37 +469,59 @@ void backspace(Expression& expr) {
     if (idx == 0) {
         if (!row->owner) return; // start of whole expression
 
+        Item* ownerItem = row->owner;
+        Row* parent = row->ownerParentRow;
+        int ownerIndex = ownerIndexInParentRow(row);
+        if (ownerIndex < 0) return;
+
         if (isBRow(row)) {
             if (rowIsEmpty(row)) {
-                int ownerIndex = ownerIndexInParentRow(row);
-                if (ownerIndex >= 0) {
-                    Row* parent = row->ownerParentRow;
-                    parent->items.erase(parent->items.begin() + ownerIndex);
-                    expr.cursor.row = parent;
-                    expr.cursor.index = ownerIndex;
-                }
+                // Empty denominator/exponent: collapse the wrapper and
+                // splice the numerator/base back into the parent row so
+                // its content survives (e.g. "2^" -> backspace -> "2",
+                // not "" ). Two backspaces now correctly remove first the
+                // exponent's digit, then the "^" box itself.
+                collapseStructuralItem(expr, parent, ownerIndex, ownerItem->a.get(), true);
                 return;
             }
             // Backspace at the very start of a denominator/exponent steps
             // back into the end of the numerator/base, matching natural
             // calculators (no data is lost).
-            Row* a = row->owner->a.get();
+            Row* a = ownerItem->a.get();
             expr.cursor.row = a;
             expr.cursor.index = (int)a->items.size();
             return;
         }
 
-        // At the leftmost position of the item's primary row (numerator/
-        // base/inner/radicand): remove the whole structural item. This is
-        // always safe/non-corrupting -- either it's empty, or the user is
-        // deleting a structure they just opened.
-        int k = ownerIndexInParentRow(row);
-        if (k >= 0) {
-            Row* parent = row->ownerParentRow;
-            parent->items.erase(parent->items.begin() + k);
-            expr.cursor.row = parent;
-            expr.cursor.index = k;
+        // row is the item's primary row (numerator/base for Fraction/
+        // Power, or the sole inner/radicand row for Paren/Sqrt), and the
+        // cursor sits at its very start.
+        bool siblingHasContent = (ownerItem->type == ItemType::Fraction ||
+                                   ownerItem->type == ItemType::Power) &&
+                                  !rowIsEmpty(ownerItem->b.get());
+
+        if (rowIsEmpty(row)) {
+            if (!siblingHasContent) {
+                // Nothing anywhere in the structure: it was just opened
+                // (or is otherwise fully empty) -- safe to remove outright.
+                parent->items.erase(parent->items.begin() + ownerIndex);
+                expr.cursor.row = parent;
+                expr.cursor.index = ownerIndex;
+            } else {
+                // The primary row is empty but the other side (e.g. an
+                // already-filled denominator/exponent reached by moving
+                // up into an empty numerator/base) has content: collapse
+                // the wrapper and keep that content instead of losing it.
+                collapseStructuralItem(expr, parent, ownerIndex, ownerItem->b.get(), true);
+            }
+            return;
         }
+
+        // The primary row has real content and the cursor is at its left
+        // boundary: step out of the structure without destroying
+        // anything, just like moveLeft does at this position.
+        expr.cursor.row = parent;
+        expr.cursor.index = ownerIndex;
         return;
     }
 
@@ -521,33 +574,47 @@ void doDelete(Expression& expr) {
     if (idx == (int)row->items.size()) {
         if (!row->owner) return; // end of whole expression
 
-        if (isBRow(row) && rowIsEmpty(row)) {
-            int ownerIndex = ownerIndexInParentRow(row);
-            if (ownerIndex >= 0) {
-                Row* parent = row->ownerParentRow;
-                parent->items.erase(parent->items.begin() + ownerIndex);
-                expr.cursor.row = parent;
-                expr.cursor.index = ownerIndex;
+        Item* ownerItem = row->owner;
+        Row* parent = row->ownerParentRow;
+        int ownerIndex = ownerIndexInParentRow(row);
+        if (ownerIndex < 0) return;
+
+        if (isBRow(row)) {
+            if (rowIsEmpty(row)) {
+                // Empty denominator/exponent, cursor at its end: collapse
+                // the wrapper and keep the numerator/base's content
+                // instead of discarding it.
+                collapseStructuralItem(expr, parent, ownerIndex, ownerItem->a.get(), true);
+                return;
             }
+            // Non-empty denominator/exponent, cursor at its end: step out
+            // of the structure (mirrors moveRight) rather than deleting
+            // real content.
+            expr.cursor.row = parent;
+            expr.cursor.index = ownerIndex + 1;
             return;
         }
 
-        if (isARow(row) && row->owner &&
-            (row->owner->type == ItemType::Fraction || row->owner->type == ItemType::Power)) {
+        if (isARow(row) &&
+            (ownerItem->type == ItemType::Fraction || ownerItem->type == ItemType::Power)) {
             // Delete at the very end of numerator/base steps forward into
             // the start of denominator/exponent.
-            Row* b = row->owner->b.get();
+            Row* b = ownerItem->b.get();
             expr.cursor.row = b;
             expr.cursor.index = 0;
             return;
         }
 
-        int k = ownerIndexInParentRow(row);
-        if (k >= 0) {
-            Row* parent = row->ownerParentRow;
-            parent->items.erase(parent->items.begin() + k);
+        // row is the sole inner/radicand row of a Paren/Sqrt, cursor at
+        // its end.
+        if (rowIsEmpty(row)) {
+            parent->items.erase(parent->items.begin() + ownerIndex);
             expr.cursor.row = parent;
-            expr.cursor.index = k;
+            expr.cursor.index = ownerIndex;
+        } else {
+            // Real content inside: step out without destroying it.
+            expr.cursor.row = parent;
+            expr.cursor.index = ownerIndex + 1;
         }
         return;
     }
